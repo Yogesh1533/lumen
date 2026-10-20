@@ -16,6 +16,7 @@ const state = {
   pending: [],         // attachments queued in the composer
   processing: 0,       // files still being read
   projects: [],        // sidebar summaries
+  settings: { memoryEnabled: true, memories: [], styles: [] },
   project: null,       // active project id
   projectData: null,   // active project incl. knowledge text
 };
@@ -167,6 +168,8 @@ const knowledgeChars = (p) => (p ? p.files.reduce((n, f) => n + (f.text ? f.text
 // Project instructions + knowledge documents + the per-chat system prompt from Controls.
 function fullSystem(chatSystem) {
   const p = state.projectData, parts = [];
+  const mem = memoryPrompt(); if (mem) parts.push(mem);
+  const style = styleText($('#styleSelect').value); if (style) parts.push('Response style: ' + style);
   if (p && p.instructions.trim()) parts.push(p.instructions.trim());
   if (p && p.files.length) parts.push('Reference documents for this project. Use them when relevant and cite the file name.\n' +
     p.files.map((f) => `<document name="${f.name}">\n${f.text}\n</document>`).join('\n'));
@@ -271,6 +274,105 @@ $('#projOpen').onclick = () => state.project && openProjectDialog(state.project)
 $('#projLeave').onclick = () => selectProject(null);
 
 
+// ---- styles + memory -----------------------------------------------------
+const PRESET_STYLES = [
+  { id: 'concise', name: 'Concise', prompt: 'Be concise. Give the shortest accurate answer: no preamble, no filler, never restate the question. Use bullet points only when they genuinely help.' },
+  { id: 'explanatory', name: 'Explanatory', prompt: 'Explain step by step, as if teaching a curious beginner. Define jargon, give a short concrete example, and finish with a one-line summary.' },
+  { id: 'formal', name: 'Formal', prompt: 'Use a formal, professional tone. No contractions, slang or emoji. Organise longer answers under clear headings.' },
+  { id: 'friendly', name: 'Friendly', prompt: 'Be warm, relaxed and conversational, like a helpful friend. Keep it light, and avoid heavy formatting.' },
+];
+function styleText(id) {
+  if (!id) return '';
+  const s = PRESET_STYLES.find((x) => x.id === id) || state.settings.styles.find((x) => x.id === id);
+  return s ? s.prompt : '';
+}
+function renderStyleSelect(keep) {
+  const sel = $('#styleSelect'), cur = keep !== undefined ? keep : sel.value;
+  sel.innerHTML = '<option value="">Style: Normal</option>' +
+    PRESET_STYLES.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('') +
+    (state.settings.styles.length ? '<optgroup label="Custom">' + state.settings.styles.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('') + '</optgroup>' : '');
+  sel.value = [...sel.options].some((o) => o.value === cur) ? cur : '';
+}
+// Facts the user asked us to remember. Never used (or saved) in Temporary chats.
+function memoryPrompt() {
+  const { memoryEnabled, memories } = state.settings;
+  if (!memoryEnabled || state.temp || !memories.length) return '';
+  return 'Things you remember about the user from earlier conversations. Treat them as background; do not bring them up unless relevant.\n' +
+    memories.map((m) => '- ' + m.text).join('\n');
+}
+async function addMemory(text) {
+  if (!state.settings.memoryEnabled) return toast('Memory is turned off (🧠 in the sidebar)');
+  try {
+    const item = await api('/memories', { method: 'POST', body: { text: text.trim().slice(0, 500) } });
+    state.settings.memories.push(item); renderSettings();
+    toast('Saved to memory');
+  } catch (e) { toast(e.message); }
+}
+// "Remember that I prefer tabs" -> saved automatically. Questions are left alone.
+const REMEMBER_RE = /^\s*(?:please\s+)?remember(?:\s+that|\s*:)?\s+(\S[\s\S]{2,})$/i;
+function rememberRequest(text) {
+  if (state.temp || /\?\s*$/.test(text)) return null;
+  const m = text.match(REMEMBER_RE);
+  return m ? m[1].trim() : null;
+}
+async function loadSettings() { state.settings = await api('/settings'); renderStyleSelect(pref('style') || ''); }
+
+let editingStyle = null;
+function renderSettings() {
+  $('#memEnabled').checked = state.settings.memoryEnabled;
+  const ml = $('#memList'); ml.innerHTML = '';
+  for (const m of state.settings.memories) {
+    const row = document.createElement('div'); row.className = 'memrow';
+    row.innerHTML = `<input value="${esc(m.text)}" maxlength="500" aria-label="Memory"><button type="button" class="icon" title="Forget">✕</button>`;
+    const input = row.querySelector('input');
+    input.onchange = async () => {
+      if (!input.value.trim()) { input.value = m.text; return; }
+      try { Object.assign(m, await api('/memories/' + m.id, { method: 'PUT', body: { text: input.value } })); toast('Memory updated'); } catch (e) { toast(e.message); }
+    };
+    row.querySelector('button').onclick = async () => {
+      await api('/memories/' + m.id, { method: 'DELETE' });
+      state.settings.memories = state.settings.memories.filter((x) => x.id !== m.id); renderSettings();
+    };
+    ml.appendChild(row);
+  }
+  const sl = $('#styleList'); sl.innerHTML = '';
+  for (const st of state.settings.styles) {
+    const row = document.createElement('div'); row.className = 'strow';
+    row.innerHTML = `<span class="nm">${esc(st.name)}</span><span class="pv">${esc(st.prompt)}</span><button type="button" class="icon" data-a="ed" title="Edit">✎</button><button type="button" class="icon" data-a="rm" title="Delete">✕</button>`;
+    row.querySelector('[data-a=ed]').onclick = () => { editingStyle = st.id; $('#stName').value = st.name; $('#stPrompt').value = st.prompt; $('#stSave').textContent = 'Save style'; $('#stCancel').hidden = false; };
+    row.querySelector('[data-a=rm]').onclick = async () => {
+      await api('/styles/' + st.id, { method: 'DELETE' });
+      state.settings.styles = state.settings.styles.filter((x) => x.id !== st.id);
+      if (editingStyle === st.id) resetStyleForm();
+      renderStyleSelect(); renderSettings();
+    };
+    sl.appendChild(row);
+  }
+}
+function resetStyleForm() { editingStyle = null; $('#stName').value = ''; $('#stPrompt').value = ''; $('#stSave').textContent = 'Add style'; $('#stCancel').hidden = true; }
+$('#settingsBtn').onclick = () => { renderSettings(); $('#settingsDlg').showModal(); };
+$('#setClose').onclick = () => $('#settingsDlg').close();
+$('#memEnabled').onchange = async (e) => { state.settings = await api('/settings', { method: 'PUT', body: { memoryEnabled: e.target.checked } }); };
+$('#memAdd').onclick = async () => { const t = $('#memInput').value.trim(); if (t) { await addMemory(t); $('#memInput').value = ''; } };
+$('#memInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#memAdd').click(); } });
+$('#memClear').onclick = async () => { if (state.settings.memories.length && confirm('Forget everything?')) { await api('/memories', { method: 'DELETE' }); state.settings.memories = []; renderSettings(); } };
+$('#stCancel').onclick = resetStyleForm;
+$('#stSave').onclick = async () => {
+  const body = { name: $('#stName').value, prompt: $('#stPrompt').value };
+  if (!body.name.trim() || !body.prompt.trim()) return toast('A style needs a name and instructions');
+  try {
+    if (editingStyle) { const u = await api('/styles/' + editingStyle, { method: 'PUT', body }); state.settings.styles = state.settings.styles.map((x) => (x.id === u.id ? u : x)); }
+    else state.settings.styles.push(await api('/styles', { method: 'POST', body }));
+    resetStyleForm(); renderStyleSelect(); renderSettings();
+  } catch (e) { toast(e.message); }
+};
+$('#styleSelect').onchange = () => {
+  pref('style', $('#styleSelect').value);
+  state.chat.style = $('#styleSelect').value;
+  if (state.chat.id && !state.temp) api('/chats/' + state.chat.id, { method: 'PUT', body: { style: state.chat.style } }).catch(() => {});
+};
+
+
 // ---- attachments ---------------------------------------------------------
 const MAX_TEXT = 200000; // chars of text kept per attached file
 const isImage = (f) => /^image\/(png|jpe?g|webp|gif|bmp)$/.test(f.type);
@@ -346,7 +448,7 @@ function msgEl(m, idx) {
     ${versionsHTML(m)}
     <div class="tools">
       <button data-act="copy">Copy</button>
-      ${isUser ? '<button data-act="edit">Edit</button>' : '<button data-act="regen">Regenerate</button>'}
+      ${isUser ? '<button data-act="edit">Edit</button><button data-act="mem">Remember</button>' : '<button data-act="regen">Regenerate</button>'}
       <button data-act="del">Delete</button>
     </div></div>`;
   paint(el, m);
@@ -491,7 +593,7 @@ function settings(promptChars = 0) {
 function newChat() {
   if (state.streaming) state.streaming.abort();
   closeArtifact();
-  state.chat = { id: null, title: 'New Chat', model: $('#modelSelect').value, system: $('#systemPrompt').value, project: state.project, messages: [] };
+  state.chat = { id: null, title: 'New Chat', model: $('#modelSelect').value, system: $('#systemPrompt').value, style: $('#styleSelect').value, project: state.project, messages: [] };
   renderAll(); renderSidebar(); $('#input').focus();
 }
 async function openChat(id) {
@@ -501,6 +603,7 @@ async function openChat(id) {
   if ((state.chat.project || null) !== state.project) { await setProject(state.chat.project || null); refreshChats(); }
   if (state.chat.model) $('#modelSelect').value = state.chat.model;
   $('#systemPrompt').value = state.chat.system || '';
+  renderStyleSelect(state.chat.style || '');
   renderAll(); renderSidebar();
 }
 async function persist() {
@@ -509,10 +612,10 @@ async function persist() {
   if (!c.id) {
     const first = c.messages.find((m) => m.role === 'user');
     c.title = first ? (first.content || (first.attachments && first.attachments[0].name) || 'New Chat').replace(/\s+/g, ' ').slice(0, 48) : 'New Chat';
-    const made = await api('/chats', { method: 'POST', body: { title: c.title, model: c.model, system: c.system, project: c.project, messages: c.messages } });
+    const made = await api('/chats', { method: 'POST', body: { title: c.title, model: c.model, system: c.system, style: c.style, project: c.project, messages: c.messages } });
     c.id = made.id;
   } else {
-    await api('/chats/' + c.id, { method: 'PUT', body: { messages: c.messages, model: c.model, system: c.system } });
+    await api('/chats/' + c.id, { method: 'PUT', body: { messages: c.messages, model: c.model, system: c.system, style: c.style } });
   }
   refreshChats();
 }
@@ -592,6 +695,8 @@ async function send(text) {
   const model = state.models.find((m) => m.id === $('#modelSelect').value);
   if (atts.some((a) => a.kind === 'image') && model && !model.caps.includes('vision'))
     return toast(`${model.id} can't see images — pick a vision-capable model`);
+  const fact = rememberRequest(text);
+  if (fact) await addMemory(fact);
   const msg = { role: 'user', content: text };
   if (atts.length) msg.attachments = atts;
   state.chat.messages.push(msg);
@@ -661,6 +766,7 @@ $('#messages').addEventListener('click', async (e) => {
     state.chat.messages.splice(idx, 1); renderAll(); persist();
   }
   else if (act === 'edit') startEdit(btn.closest('.msg'), m);
+  else if (act === 'mem') { if (state.temp) toast('Temporary chats do not use memory'); else await addMemory(m.content); }
   else if (act === 'editcancel') renderAll();
   else if (act === 'editsave') {
     const text = btn.closest('.msg').querySelector('.editbox').value.trim();
@@ -693,6 +799,7 @@ state.ready = (async function init() {
     $('#status').textContent = 'Cannot reach Ollama — start it with: ollama serve';
   }
   await loadProjects();
+  await loadSettings();
   newChat();
   refreshChats();
 })();

@@ -26,6 +26,8 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 - Thinking: reasoning models get a collapsible "Thinking…" block with a live timer ("Thought for 2.3s" once done) and a header toggle to switch thinking off
 - Edit and regenerate keep every version: edit any of your messages inline, or regenerate a reply, and flip between versions with `‹ 1/2 ›`. Branches are saved with the chat
 - Auto titles: chats are named by the model after the first exchange (rename a chat to keep your own title)
+- Styles: Concise / Explanatory / Formal / Friendly presets plus your own custom styles, chosen per chat from the header
+- Memory (🧠 in the sidebar): facts the assistant carries into every chat. Add them by hand, with the Remember button on a message, or by typing "Remember that …". Memory is never used or saved in Temporary chats, and can be switched off
 - Safe markdown rendering (code blocks with copy, lists, tables, quotes)
 
 ## API

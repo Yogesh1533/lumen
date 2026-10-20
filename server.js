@@ -20,6 +20,9 @@ try { chats = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { chats = 
 const PROJ_FILE = path.join(path.dirname(DATA_FILE), 'projects.json');
 let projects = {};
 try { projects = JSON.parse(fs.readFileSync(PROJ_FILE, 'utf8')); } catch { projects = {}; }
+const SETTINGS_FILE = path.join(path.dirname(DATA_FILE), 'settings.json');
+let settings = { memoryEnabled: true, memories: [], styles: [] };
+try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch { /* first run */ }
 const timers = new Map();
 function write(file, obj) {
   clearTimeout(timers.get(file));
@@ -32,6 +35,7 @@ function write(file, obj) {
 }
 const save = () => write(DATA_FILE, chats);
 const saveProjects = () => write(PROJ_FILE, projects);
+const saveSettings = () => write(SETTINGS_FILE, settings);
 const projectSummary = ({ files, ...p }) => ({ ...p, files: files.map(({ text, ...f }) => ({ ...f, chars: text.length })) });
 const summary = ({ messages, ...c }) => ({ ...c, count: messages.length });
 
@@ -134,6 +138,40 @@ async function api(req, res, url) {
     return;
   }
 
+  if (parts[0] === 'settings') {
+    if (m === 'GET') return send(res, 200, settings);
+    if (m === 'PUT') {
+      const b = await readBody(req);
+      if (typeof b.memoryEnabled === 'boolean') settings.memoryEnabled = b.memoryEnabled;
+      saveSettings();
+      return send(res, 200, settings);
+    }
+  }
+
+  // Memory facts and custom styles share the same simple CRUD shape.
+  const lists = { memories: ['text'], styles: ['name', 'prompt'] };
+  if (lists[parts[0]]) {
+    const key = parts[0], fields = lists[key], id = parts[1];
+    const clean = (b) => Object.fromEntries(fields.map((f) => [f, String(b[f] || '').trim().slice(0, key === 'memories' ? 500 : f === 'name' ? 40 : 2000)]));
+    if (!id && m === 'POST') {
+      const item = { id: crypto.randomUUID(), ...clean(await readBody(req)), created: Date.now() };
+      if (fields.some((f) => !item[f])) return send(res, 400, { error: fields.join(' and ') + ' required' });
+      if (key === 'memories' && settings.memories.length >= 100) return send(res, 400, { error: 'Memory is full (100 items) — delete some first' });
+      settings[key].push(item); saveSettings();
+      return send(res, 200, item);
+    }
+    if (!id && m === 'DELETE') { settings[key] = []; saveSettings(); return send(res, 200, { ok: true }); }
+    const idx = settings[key].findIndex((x) => x.id === id);
+    if (idx < 0) return send(res, 404, { error: 'not found' });
+    if (m === 'PUT') {
+      const next = { ...settings[key][idx], ...clean(await readBody(req)) };
+      if (fields.some((f) => !next[f])) return send(res, 400, { error: fields.join(' and ') + ' required' });
+      settings[key][idx] = next; saveSettings();
+      return send(res, 200, next);
+    }
+    if (m === 'DELETE') { settings[key].splice(idx, 1); saveSettings(); return send(res, 200, { ok: true }); }
+  }
+
   if (parts[0] === 'projects') {
     const id = parts[1];
     if (!id && m === 'GET') return send(res, 200, Object.values(projects).sort((a, b) => b.updated - a.updated).map(projectSummary));
@@ -191,7 +229,7 @@ async function api(req, res, url) {
       const b = await readBody(req);
       const now = Date.now();
       const c = { id: crypto.randomUUID(), title: b.title || 'New Chat', model: b.model || '',
-        system: b.system || '', project: projects[b.project] ? b.project : null, pinned: false, created: now, updated: now, messages: b.messages || [] };
+        system: b.system || '', style: b.style || '', project: projects[b.project] ? b.project : null, pinned: false, created: now, updated: now, messages: b.messages || [] };
       chats[c.id] = c; save();
       return send(res, 200, c);
     }
@@ -204,7 +242,7 @@ async function api(req, res, url) {
     if (id && m === 'GET') return send(res, 200, chats[id]);
     if (id && m === 'PUT') {
       const b = await readBody(req);
-      for (const k of ['title', 'model', 'system', 'pinned', 'messages', 'titled']) if (k in b) chats[id][k] = b[k];
+      for (const k of ['title', 'model', 'system', 'pinned', 'messages', 'titled', 'style']) if (k in b) chats[id][k] = b[k];
       if ('project' in b) chats[id].project = projects[b.project] ? b.project : null;
       chats[id].updated = Date.now(); save();
       return send(res, 200, summary(chats[id]));
