@@ -163,7 +163,7 @@ $('#artDownload').onclick = () => {
   const l = document.createElement('a'); l.href = url; l.download = `${artTitle(a).replace(/[^\w-]+/g, '-').toLowerCase()}.${ART_EXT[a.lang]}`;
   l.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#artifact').hidden) closeArtifact(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#artifact').hidden && !state.streaming && !state.toolsBusy) closeArtifact(); });
 
 
 // ---- projects ------------------------------------------------------------
@@ -468,14 +468,15 @@ function renderMcp() {
   const box = $('#mcpList'); box.innerHTML = '';
   for (const srv of state.mcp) {
     const d = document.createElement('div'); d.className = 'mcp';
-    const where = srv.transport === 'http' ? srv.url : srv.command;
+    const where = srv.builtin ? 'Built in — no process to run' : srv.transport === 'http' ? srv.url : srv.command;
     d.innerHTML = `<div class="mh"><span class="dot ${srv.enabled ? srv.status : ''}" title="${srv.enabled ? srv.status : 'disabled'}"></span><span class="nm">${esc(srv.name)}</span>
       <span class="meta">${srv.enabled && srv.status === 'connected' ? srv.tools.length + ' tools' : srv.enabled ? srv.status : 'off'}</span>
-      <label class="toggle"><input type="checkbox" data-a="en" ${srv.enabled ? 'checked' : ''}> On</label>
-      <button type="button" class="icon" data-a="rc" title="Reconnect">↻</button><button type="button" class="icon" data-a="rm" title="Remove">✕</button></div>
+      ${srv.builtin ? '' : `<label class="toggle"><input type="checkbox" data-a="en" ${srv.enabled ? 'checked' : ''}> On</label>
+      <button type="button" class="icon" data-a="rc" title="Reconnect">↻</button><button type="button" class="icon" data-a="rm" title="Remove">✕</button>`}</div>
       <div class="meta" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(where)}</div>
       ${srv.error ? `<div class="err">${esc(srv.error)}</div>` : ''}
       ${srv.tools.length ? `<details><summary>${srv.tools.length} tools</summary>${srv.tools.map((t) => `<div><b>${esc(t.name)}</b> ${esc(t.description).slice(0, 160)}</div>`).join('')}</details>` : ''}`;
+    if (srv.builtin) { box.appendChild(d); continue; }
     d.querySelector('[data-a=en]').onchange = async (e) => { await mcpAct(() => api('/mcp/' + srv.id, { method: 'PUT', body: { enabled: e.target.checked } })); };
     d.querySelector('[data-a=rc]').onclick = () => mcpAct(() => api(`/mcp/${srv.id}/reconnect`, { method: 'POST' }));
     d.querySelector('[data-a=rm]').onclick = async () => {
@@ -485,6 +486,7 @@ function renderMcp() {
     };
     box.appendChild(d);
   }
+  renderWeb();
   const al = $('#allowList'); al.innerHTML = '';
   for (const key of toolAllow()) {
     const [sid, ...t] = key.split('/'), srv = state.mcp.find((x) => x.id === sid);
@@ -518,6 +520,137 @@ $('#mcAdd').onclick = async () => {
     $('#mcName').value = ''; $('#mcCmd').value = ''; $('#mcUrl').value = ''; $('#mcEnv').value = '';
     if (srv.status !== 'connected') toast('Added, but it could not connect — see the error below');
   });
+};
+
+
+// ---- web access (built-in tools) -------------------------------------------
+function renderWeb() {
+  const w = state.settings.web || { enabled: false, provider: '' };
+  $('#webOn').checked = w.enabled;
+  $('#webCfg').hidden = !w.enabled;
+  $('#webProv').value = w.provider || '';
+  $('#webUrl').value = w.searxngUrl || '';
+  $('#webUrl').hidden = w.provider !== 'searxng' && $('#webProv').value !== 'searxng';
+  $('#webKey').hidden = $('#webProv').value !== 'brave';
+  $('#webKey').placeholder = w.hasBraveKey ? 'Key saved — leave blank to keep it' : 'Brave Search API key';
+}
+async function saveWeb(web) {
+  state.settings = await api('/settings', { method: 'PUT', body: { web } });
+  await loadMcp(); renderMcp();
+}
+$('#webOn').onchange = (e) => saveWeb({ enabled: e.target.checked }).catch((err) => toast(err.message));
+$('#webProv').onchange = () => { $('#webUrl').hidden = $('#webProv').value !== 'searxng'; $('#webKey').hidden = $('#webProv').value !== 'brave'; };
+$('#webSave').onclick = async () => {
+  try {
+    await saveWeb({ provider: $('#webProv').value, searxngUrl: $('#webUrl').value, braveKey: $('#webKey').value });
+    $('#webKey').value = ''; toast('Web settings saved');
+  } catch (e) { toast(e.message); }
+};
+
+// ---- command palette + shortcuts -----------------------------------------
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD = isMac ? '⌘' : 'Ctrl+';
+const SHORTCUTS = [
+  [`${MOD}K`, 'Command palette'], [`${MOD}Shift+O`, 'New chat'], [`${MOD}B`, 'Toggle sidebar'],
+  [`${MOD}/`, 'Keyboard shortcuts'], ['Enter / Shift+Enter', 'Send / new line'], ['Esc', 'Stop the reply, or close the artifact'],
+];
+const toggleSideBar = () => $('#sidebar').classList.toggle('closed');
+let palItems = [], palSel = 0;
+function buildPalette(chats) {
+  const items = [], act = (label, hint, run) => items.push({ label, hint, run });
+  act('New chat', `${MOD}Shift+O`, () => newChat());
+  act('Toggle sidebar', `${MOD}B`, toggleSideBar);
+  act('Toggle dark / light theme', '', () => $('#themeBtn').click());
+  if (!$('#thinkWrap').hidden) act('Toggle thinking', '', () => $('#thinkToggle').click());
+  act('Toggle temporary chat', '', () => $('#tempToggle').click());
+  act('Open controls (system prompt, temperature…)', '', () => $('#controlsBtn').click());
+  act('Tools & MCP servers', '', () => $('#toolsBtn').click());
+  act('Memory & styles', '', () => $('#settingsBtn').click());
+  act('New project', '', () => $('#newProject').click());
+  act('Export chats', '', () => $('#exportBtn').click());
+  act('Keyboard shortcuts', `${MOD}/`, openHelp);
+  for (const m of state.models) act('Model: ' + m.id, 'model', () => { $('#modelSelect').value = m.id; $('#modelSelect').dispatchEvent(new Event('change')); toast('Model: ' + m.id); });
+  act('Style: Normal', 'style', () => { $('#styleSelect').value = ''; $('#styleSelect').dispatchEvent(new Event('change')); });
+  for (const st of [...PRESET_STYLES, ...state.settings.styles]) act('Style: ' + st.name, 'style', () => { $('#styleSelect').value = st.id; $('#styleSelect').dispatchEvent(new Event('change')); toast('Style: ' + st.name); });
+  if (state.project) act('Leave project', 'project', () => selectProject(null));
+  for (const p of state.projects) act('Project: ' + p.name, 'project', () => selectProject(p.id));
+  for (const c of chats) act('Chat: ' + c.title, 'chat', () => openChat(c.id));
+  return items;
+}
+function paletteFilter(items, q) {
+  const toks = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!toks.length) return items.slice(0, 60);
+  return items.map((it) => {
+    const l = it.label.toLowerCase(); let score = 0;
+    for (const t of toks) { const i = l.indexOf(t); if (i < 0) return null; score += i + (i === 0 || l[i - 1] === ' ' || l[i - 1] === ':' ? -5 : 0); }
+    return { it, score: score + l.length / 100 };
+  }).filter(Boolean).sort((a, b) => a.score - b.score).map((x) => x.it).slice(0, 60);
+}
+function renderPalette() {
+  const shown = paletteFilter(palItems, $('#palIn').value); palSel = Math.min(palSel, Math.max(shown.length - 1, 0));
+  const box = $('#palList'); box.innerHTML = '';
+  if (!shown.length) { box.innerHTML = '<div class="pal none">No matches</div>'; return; }
+  shown.forEach((it, i) => {
+    const d = document.createElement('div'); d.className = 'pal' + (i === palSel ? ' sel' : ''); d.setAttribute('role', 'option');
+    d.innerHTML = `<span class="l">${esc(it.label)}</span><span class="h">${esc(it.hint || '')}</span>`;
+    d.onclick = () => runPalette(it); d.onmousemove = () => { if (palSel !== i) { palSel = i; renderPalette(); } };
+    box.appendChild(d);
+  });
+  box.children[palSel].scrollIntoView({ block: 'nearest' });
+  palShown = shown;
+}
+let palShown = [];
+function runPalette(it) { $('#palette').close(); setTimeout(() => it.run(), 30); }
+async function openPalette() {
+  const dlg = $('#palette'); if (dlg.open) return dlg.close();
+  document.querySelectorAll('dialog[open]').forEach((d) => d.close());
+  palSel = 0; $('#palIn').value = ''; palItems = buildPalette(state.chats); renderPalette(); dlg.showModal(); $('#palIn').focus();
+  try { palItems = buildPalette(await api('/chats')); renderPalette(); } catch { /* sidebar chats are enough */ } // include every project's chats
+}
+$('#palIn').addEventListener('input', () => { palSel = 0; renderPalette(); });
+$('#palIn').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); palSel = Math.min(palSel + 1, palShown.length - 1); renderPalette(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); palSel = Math.max(palSel - 1, 0); renderPalette(); }
+  else if (e.key === 'Enter') { e.preventDefault(); if (palShown[palSel]) runPalette(palShown[palSel]); }
+});
+function openHelp() {
+  $('#helpList').innerHTML = SHORTCUTS.map(([k, d]) => `<div class="krow"><span>${esc(d)}</span><kbd>${esc(k)}</kbd></div>`).join('');
+  $('#helpDlg').showModal();
+}
+$('#helpClose').onclick = () => $('#helpDlg').close();
+window.addEventListener('keydown', (e) => {
+  const mod = isMac ? e.metaKey : e.ctrlKey;
+  if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+  else if (mod && !e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSideBar(); }
+  else if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newChat(); }
+  else if (mod && e.key === '/') { e.preventDefault(); openHelp(); }
+  else if (e.key === 'Escape' && (state.streaming || state.toolsBusy) && !document.querySelector('dialog[open]')) $('#stopBtn').click();
+});
+
+// ---- voice dictation (browser speech recognition) --------------------------
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null;
+if (SpeechRec) $('#micBtn').hidden = false;
+function stopDictation() { if (recog) recog.stop(); }
+$('#micBtn').onclick = () => {
+  if (recog) return stopDictation();
+  if (pref('dictConsent') !== '1') {
+    if (!confirm('Dictation uses your browser’s built-in speech recognition. In Chrome and Edge the audio is sent to the browser vendor’s servers for transcription, so it is not fully local.\n\nTurn it on?')) return;
+    pref('dictConsent', '1');
+  }
+  const r = recog = new SpeechRec();
+  r.lang = navigator.language || 'en-US'; r.interimResults = true; r.continuous = true;
+  const base = $('#input').value, sep = base && !/\s$/.test(base) ? ' ' : '';
+  let finalText = '';
+  r.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) { const res = e.results[i]; if (res.isFinal) finalText += res[0].transcript; else interim += res[0].transcript; }
+    $('#input').value = base + sep + finalText + interim; autosize();
+  };
+  r.onerror = (e) => { if (!['aborted', 'no-speech'].includes(e.error)) toast(e.error === 'not-allowed' ? 'Microphone access was blocked' : 'Dictation: ' + e.error); };
+  r.onend = () => { recog = null; $('#micBtn').classList.remove('on'); $('#input').focus(); };
+  $('#micBtn').classList.add('on');
+  try { r.start(); } catch (e) { recog = null; $('#micBtn').classList.remove('on'); toast('Could not start dictation'); }
 };
 
 
