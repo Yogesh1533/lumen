@@ -179,3 +179,19 @@ dialog input[type=text], dialog input:not([type]) { background: var(--bg); borde
 :root[data-theme="dark"] .warn { color: #ffcc66; }
 .dlg-actions { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
 #moveSel { width: 100%; }
+
+/* thinking + versions + inline edit */
+details.think { border: 1px solid var(--border); border-radius: 10px; margin: 0 0 10px; background: var(--panel); font-size: 13px; }
+details.think summary { cursor: pointer; padding: 6px 12px; color: var(--muted); font-weight: 600; user-select: none; list-style: none; }
+details.think summary::-webkit-details-marker { display: none; }
+details.think summary::before { content: "▸"; display: inline-block; width: 1em; transition: transform .15s; }
+details.think[open] summary::before { transform: rotate(90deg); }
+details.think .tbody { padding: 0 12px 10px; color: var(--muted); white-space: pre-wrap; max-height: 240px; overflow-y: auto; }
+details.think.live summary::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 8px; border-radius: 50%; background: var(--accent); animation: blink 1s steps(2) infinite; vertical-align: middle; }
+.vers { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.vers button { padding: 0 6px; color: var(--muted); }
+.vers button:disabled { opacity: .3; cursor: default; }
+.msg.user .content.editing { display: block; background: none; padding: 0; white-space: normal; }
+.editbox { width: 100%; min-height: 80px; resize: vertical; }
+.editbar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+.editbar button { padding: 6px 14px; font-size: 13px; }
