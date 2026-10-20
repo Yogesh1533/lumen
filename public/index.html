@@ -41,7 +41,10 @@
     </section>
 
     <form id="composer">
-      <div class="box">
+      <div class="box" id="dropzone">
+        <div id="chips"></div>
+        <button id="attachBtn" class="attach" type="button" title="Attach files or images">＋</button>
+        <input id="fileInput" type="file" multiple hidden accept="image/*,.pdf,.txt,.md,.csv,.json,.js,.ts,.py,.html,.css,.yaml,.yml,.xml,.log,.sh,.sql,.go,.rs,.java,.c,.cpp,.h,.rb,.php,.swift,.kt,text/*">
         <textarea id="input" rows="1" placeholder="Send a message…  (Enter to send, Shift+Enter for newline)"></textarea>
         <button id="sendBtn" class="send" type="submit" title="Send">↑</button>
         <button id="stopBtn" class="send stop" type="button" title="Stop" hidden>■</button>

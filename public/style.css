@@ -92,8 +92,8 @@ header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; bord
 body.chatting #welcome { display: none; }
 
 #composer { padding: 8px 16px 14px; }
-.box { max-width: 780px; margin: 0 auto; display: flex; align-items: flex-end; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 22px; padding: 8px 8px 8px 16px; }
-.box textarea { border: 0; background: none; resize: none; max-height: 220px; padding: 8px 0; outline: none !important; }
+.box { max-width: 780px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 22px; padding: 8px 8px 8px 16px; }
+.box textarea { flex: 1; width: auto; border: 0; background: none; resize: none; max-height: 220px; padding: 8px 0; outline: none !important; }
 .send { width: 36px; height: 36px; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font-weight: 700; padding: 0; flex: none; }
 .send[hidden] { display: none; }
 .send:disabled { opacity: .4; cursor: default; }
@@ -107,3 +107,21 @@ body.chatting #welcome { display: none; }
   #suggestions { grid-template-columns: 1fr; }
   #openSide { display: inline-block !important; }
 }
+
+/* attachments */
+.attach { width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); color: var(--muted); font-size: 20px; padding: 0; flex: none; order: 1; }
+.attach:hover { background: var(--panel2); }
+.box .attach { order: 1; } .box textarea { order: 2; } .box .send { order: 3; }
+#chips { order: 0; flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; }
+#chips:empty { display: none; }
+.chip { position: relative; display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 4px 8px 4px 4px; font-size: 12px; max-width: 220px; }
+.chip img, .att img { width: 40px; height: 40px; object-fit: cover; border-radius: 7px; display: block; }
+.chip .ico { width: 40px; height: 40px; border-radius: 7px; background: var(--panel2); display: grid; place-items: center; font-size: 10px; font-weight: 700; color: var(--muted); }
+.chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip .meta { color: var(--muted); font-size: 11px; }
+.chip button { padding: 0 4px; color: var(--muted); }
+.chip.busy { opacity: .6; }
+.atts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.att img { width: 120px; height: 120px; border-radius: 10px; cursor: zoom-in; }
+.att.file { display: flex; align-items: center; gap: 8px; background: var(--panel2); border-radius: 10px; padding: 6px 10px; font-size: 12px; }
+.box.drag { outline: 2px dashed var(--accent); outline-offset: 3px; }

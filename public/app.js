@@ -13,6 +13,8 @@ const state = {
   models: [],
   streaming: null,     // AbortController while a reply is in flight
   temp: false,
+  pending: [],         // attachments queued in the composer
+  processing: 0,       // files still being read
 };
 
 // ---- utilities -----------------------------------------------------------
@@ -86,6 +88,66 @@ function markdown(src) {
   return out.join('');
 }
 
+
+// ---- attachments ---------------------------------------------------------
+const MAX_TEXT = 200000; // chars of text kept per attached file
+const isImage = (f) => /^image\/(png|jpe?g|webp|gif|bmp)$/.test(f.type);
+const isPdf = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+const fileToDataURL = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+
+async function readImage(f) {
+  const url = await fileToDataURL(f);
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+  const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
+  const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  const data = cv.toDataURL('image/jpeg', 0.85).split(',')[1];
+  return { kind: 'image', name: f.name || 'image.jpg', mime: 'image/jpeg', data, size: Math.round(data.length * 0.75) };
+}
+async function readFile(f) {
+  if (isImage(f)) return readImage(f);
+  if (isPdf(f)) {
+    const data = (await fileToDataURL(f)).split(',')[1];
+    const { text, pages } = await api('/extract', { method: 'POST', body: { data } });
+    if (!text) throw new Error('no extractable text (scanned PDF?)');
+    return { kind: 'text', name: f.name, mime: 'application/pdf', text: text.slice(0, MAX_TEXT), pages, truncated: text.length > MAX_TEXT, size: f.size };
+  }
+  if (f.size > 5e6) throw new Error('file too large (5 MB max for text files)');
+  const text = await f.text();
+  if (text.includes('\u0000')) throw new Error('binary files are not supported');
+  return { kind: 'text', name: f.name, mime: f.type || 'text/plain', text: text.slice(0, MAX_TEXT), truncated: text.length > MAX_TEXT, size: f.size };
+}
+async function addFiles(files) {
+  for (const f of files) {
+    state.processing++; renderChips();
+    try { state.pending.push(await readFile(f)); }
+    catch (e) { toast(`${f.name || 'file'}: ${e.message || e}`); }
+    state.processing--; renderChips();
+  }
+}
+const sizeLabel = (n) => n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB';
+function renderChips() {
+  const box = $('#chips'); box.innerHTML = '';
+  state.pending.forEach((a, i) => {
+    const d = document.createElement('div'); d.className = 'chip';
+    const thumb = a.kind === 'image' ? `<img alt="" src="data:${a.mime};base64,${a.data}">` : `<div class="ico">${esc((a.name.split('.').pop() || 'TXT').slice(0, 4).toUpperCase())}</div>`;
+    d.innerHTML = `${thumb}<div><div class="nm">${esc(a.name)}</div><div class="meta">${sizeLabel(a.size)}${a.pages ? ` · ${a.pages}p` : ''}${a.truncated ? ' · truncated' : ''}</div></div><button type="button" title="Remove">✕</button>`;
+    d.querySelector('button').onclick = () => { state.pending.splice(i, 1); renderChips(); };
+    box.appendChild(d);
+  });
+  if (state.processing) box.insertAdjacentHTML('beforeend', '<div class="chip busy"><div class="nm">Reading…</div></div>');
+}
+// What the model actually sees: text attachments are inlined, images go in `images`.
+function buildContent(m) {
+  const files = (m.attachments || []).filter((a) => a.kind === 'text');
+  return (m.content || '') + files.map((a) => `\n\n<attachment name="${a.name}">\n${a.text}\n</attachment>`).join('');
+}
+const toOllama = ({ role, content, attachments, ...rest }) => {
+  const images = (attachments || []).filter((a) => a.kind === 'image').map((a) => a.data);
+  return { role, content: buildContent({ content, attachments }), ...(images.length ? { images } : {}) };
+};
+
 // ---- rendering -----------------------------------------------------------
 function msgEl(m, idx) {
   const el = document.createElement('div');
@@ -104,7 +166,20 @@ function msgEl(m, idx) {
 }
 function paint(el, m, live) {
   const c = el.querySelector('.content');
-  if (m.role === 'user') c.textContent = m.content;
+  if (m.role === 'user') {
+    c.textContent = m.content;
+    const atts = m.attachments || [];
+    const wrap = el.querySelector('.atts');
+    if (wrap) wrap.remove();
+    if (atts.length) {
+      const w = document.createElement('div'); w.className = 'atts';
+      w.innerHTML = atts.map((a) => a.kind === 'image'
+        ? `<div class="att"><img alt="${esc(a.name)}" title="${esc(a.name)}" src="data:${a.mime};base64,${a.data}"></div>`
+        : `<div class="att file">📄 ${esc(a.name)}${a.pages ? ` · ${a.pages}p` : ''}</div>`).join('');
+      c.parentNode.insertBefore(w, c);
+      c.style.display = m.content ? '' : 'none';
+    }
+  }
   else c.innerHTML = (m.thinking ? `<div class="think">${esc(m.thinking)}</div>` : '') + markdown(m.content || '') + (m.error ? `<p class="err">${esc(m.error)}</p>` : '');
   c.classList.toggle('cursor', !!live);
 }
@@ -170,7 +245,7 @@ async function persist() {
   if (state.temp) return;
   if (!c.id) {
     const first = c.messages.find((m) => m.role === 'user');
-    c.title = first ? first.content.replace(/\s+/g, ' ').slice(0, 48) : 'New Chat';
+    c.title = first ? (first.content || (first.attachments && first.attachments[0].name) || 'New Chat').replace(/\s+/g, ' ').slice(0, 48) : 'New Chat';
     const made = await api('/chats', { method: 'POST', body: { title: c.title, model: c.model, system: c.system, messages: c.messages } });
     c.id = made.id;
   } else {
@@ -199,7 +274,7 @@ async function generate() {
     const r = await fetch('/api/chat', {
       method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: c.model, system: c.system, options: settings(),
-        messages: c.messages.slice(0, -1).map(({ role, content }) => ({ role, content })) }),
+        messages: c.messages.slice(0, -1).map(toOllama) }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const reader = r.body.getReader(), dec = new TextDecoder();
@@ -236,9 +311,17 @@ async function generate() {
 
 async function send(text) {
   text = text.trim();
-  if (!text || state.streaming) return;
+  if ((!text && !state.pending.length) || state.streaming) return;
   await state.ready; // model list may still be loading right after page load
-  state.chat.messages.push({ role: 'user', content: text });
+  if (state.processing) return toast('Still reading attachments…');
+  const atts = state.pending;
+  const model = state.models.find((m) => m.id === $('#modelSelect').value);
+  if (atts.some((a) => a.kind === 'image') && model && !model.caps.includes('vision'))
+    return toast(`${model.id} can't see images — pick a vision-capable model`);
+  const msg = { role: 'user', content: text };
+  if (atts.length) msg.attachments = atts;
+  state.chat.messages.push(msg);
+  state.pending = []; renderChips();
   $('#input').value = ''; autosize();
   await generate();
 }
@@ -250,6 +333,18 @@ $('#input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send($('#input').value); }
 });
 $('#composer').addEventListener('submit', (e) => { e.preventDefault(); send($('#input').value); });
+$('#attachBtn').onclick = () => $('#fileInput').click();
+$('#fileInput').onchange = (e) => { addFiles([...e.target.files]); e.target.value = ''; };
+$('#input').addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+{
+  const dz = $('#dropzone');
+  for (const t of ['dragenter', 'dragover']) window.addEventListener(t, (e) => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); dz.classList.add('drag'); } });
+  window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) dz.classList.remove('drag'); });
+  window.addEventListener('drop', (e) => { if (e.dataTransfer?.files.length) { e.preventDefault(); dz.classList.remove('drag'); addFiles([...e.dataTransfer.files]); } });
+}
 $('#stopBtn').onclick = () => state.streaming && state.streaming.abort();
 $('#newChat').onclick = newChat;
 $('#search').addEventListener('input', () => { clearTimeout($('#search').t); $('#search').t = setTimeout(refreshChats, 200); });
@@ -275,7 +370,7 @@ $('#messages').addEventListener('click', async (e) => {
   const idx = +btn.closest('.msg').dataset.idx, m = state.chat.messages[idx], act = btn.dataset.act;
   if (act === 'copy') { await navigator.clipboard.writeText(m.content); toast('Copied'); }
   else if (act === 'del') { state.chat.messages.splice(idx, 1); renderAll(); persist(); }
-  else if (act === 'edit') { state.chat.messages.length = idx; renderAll(); $('#input').value = m.content; autosize(); $('#input').focus(); }
+  else if (act === 'edit') { state.chat.messages.length = idx; renderAll(); state.pending = m.attachments || []; renderChips(); $('#input').value = m.content; autosize(); $('#input').focus(); }
   else if (act === 'regen') { state.chat.messages.length = idx; await generate(); }
 });
 

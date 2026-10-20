@@ -29,6 +29,18 @@ function save() {
 }
 const summary = ({ messages, ...c }) => ({ ...c, count: messages.length });
 
+const pdfParse = require('pdf-parse/lib/pdf-parse.js'); // skip the package's debug-mode index
+const capCache = new Map();
+async function capabilities(name) {
+  if (capCache.has(name)) return capCache.get(name);
+  try {
+    const r = await fetch(`${OLLAMA}/api/show`, { method: 'POST', body: JSON.stringify({ model: name }) });
+    const caps = (await r.json()).capabilities || [];
+    capCache.set(name, caps);
+    return caps;
+  } catch { return []; }
+}
+
 // ---- helpers -------------------------------------------------------------
 function send(res, code, body) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -37,7 +49,7 @@ function send(res, code, body) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 25e6) req.destroy(); });
+    req.on('data', (c) => { data += c; if (data.length > 80e6) req.destroy(); });
     req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
     req.on('error', reject);
   });
@@ -56,12 +68,24 @@ async function api(req, res, url) {
     try {
       const r = await fetch(`${OLLAMA}/api/tags`);
       const j = await r.json();
-      return send(res, 200, { models: (j.models || []).map((x) => ({
+      const models = await Promise.all((j.models || []).map(async (x) => ({
         id: x.name, size: x.size, family: x.details && x.details.family,
-        params: x.details && x.details.parameter_size,
-      })) });
+        params: x.details && x.details.parameter_size, caps: await capabilities(x.name),
+      })));
+      return send(res, 200, { models });
     } catch (e) {
       return send(res, 502, { error: `Cannot reach Ollama at ${OLLAMA}`, models: [] });
+    }
+  }
+
+  // Extract text from an uploaded PDF (base64 in JSON).
+  if (parts[0] === 'extract' && m === 'POST') {
+    const b = await readBody(req);
+    try {
+      const out = await pdfParse(Buffer.from(b.data || '', 'base64'));
+      return send(res, 200, { text: out.text.trim(), pages: out.numpages });
+    } catch (e) {
+      return send(res, 422, { error: 'Could not read PDF: ' + (e.message || e) });
     }
   }
 
