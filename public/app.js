@@ -17,6 +17,10 @@ const state = {
   processing: 0,       // files still being read
   projects: [],        // sidebar summaries
   settings: { memoryEnabled: true, memories: [], styles: [] },
+  mcp: [],             // MCP servers incl. status + tools
+  toolsOn: true,
+  toolsBusy: false,    // a tool-call round is running / awaiting approval
+  stopTools: false,
   project: null,       // active project id
   projectData: null,   // active project incl. knowledge text
 };
@@ -373,6 +377,150 @@ $('#styleSelect').onchange = () => {
 };
 
 
+// ---- tools / MCP ---------------------------------------------------------
+const approvals = new Map(); // call id -> resolve(choice)
+const MAX_TOOL_ROUNDS = 8;
+const toolAllow = () => { try { return new Set(JSON.parse(pref('toolAllow') || '[]')); } catch { return new Set(); } };
+const saveAllow = (set) => pref('toolAllow', JSON.stringify([...set]));
+const slug = (x) => x.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24) || 'srv';
+
+async function loadMcp() { try { state.mcp = await api('/mcp'); } catch { state.mcp = []; } updateToolsBtn(); }
+function connectedServers() { return state.mcp.filter((x) => x.enabled && x.status === 'connected' && x.tools.length); }
+function updateToolsBtn() {
+  const n = connectedServers().reduce((t, x) => t + x.tools.length, 0), b = $('#toolsBtn');
+  b.classList.toggle('on', state.toolsOn && n > 0); b.dataset.n = n;
+}
+// Ollama function names must be simple identifiers, so namespace them per server.
+function buildTools() {
+  const map = new Map(), defs = [], used = new Set();
+  for (const srv of connectedServers()) {
+    let prefix = slug(srv.name); while (used.has(prefix)) prefix += '_';
+    used.add(prefix);
+    for (const t of srv.tools) {
+      const name = (prefix + '__' + t.name).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+      map.set(name, { server: srv.id, serverName: srv.name, tool: t.name });
+      defs.push({ type: 'function', function: { name, description: `[${srv.name}] ${t.description}`.slice(0, 1000), parameters: t.inputSchema } });
+    }
+  }
+  return defs.length ? { defs, map } : null;
+}
+const trailingToolRounds = (msgs) => { let n = 0; for (let i = msgs.length - 1; i >= 0 && msgs[i].toolCalls; i--) n++; return n; };
+function registerCall(tc, map) {
+  const fn = tc.function || {}, hit = map && map.get(fn.name);
+  return {
+    id: crypto.randomUUID(), name: fn.name, server: hit ? hit.server : null, serverName: hit ? hit.serverName : 'unknown', tool: hit ? hit.tool : fn.name,
+    arguments: fn.arguments && typeof fn.arguments === 'object' ? fn.arguments : {},
+    status: hit ? 'queued' : 'error', ...(hit ? {} : { result: `Unknown tool "${fn.name}".` }),
+  };
+}
+const TOOL_STATUS = { queued: 'Queued', awaiting: 'Waiting for your approval', running: 'Running…', done: 'Done', error: 'Failed', denied: 'Denied' };
+function toolsHTML(m) {
+  if (!m.toolCalls || !m.toolCalls.length) return '';
+  return m.toolCalls.map((c) => `<div class="toolcall ${c.status}" data-call="${c.id}">
+    <div class="th"><span>🔧</span><b>${esc(c.serverName)} › ${esc(c.tool)}</b><span class="ts">${TOOL_STATUS[c.status] || c.status}</span></div>
+    <details><summary>Arguments</summary><pre>${esc(JSON.stringify(c.arguments, null, 2))}</pre></details>
+    ${c.status === 'awaiting' ? '<div class="appr"><button type="button" class="primary" data-tc="once">Allow once</button><button type="button" data-tc="always">Always allow</button><button type="button" class="deny" data-tc="deny">Deny</button></div>' : ''}
+    ${c.result ? `<details><summary>Result</summary><pre>${esc(c.result)}</pre></details>` : ''}
+  </div>`).join('');
+}
+function cancelTools() {
+  state.stopTools = true;
+  for (const res of approvals.values()) res('deny');
+}
+// Runs the model's tool calls one by one, asking permission first. Returns true to let the model continue.
+async function runToolCalls(c, reply) {
+  state.toolsBusy = true; state.stopTools = false; setBusy(true);
+  const repaint = () => {
+    const el = $('#messages').children[c.messages.indexOf(reply)];
+    if (el && state.chat === c) paint(el, reply, false);
+  };
+  try {
+    for (const call of reply.toolCalls) {
+      if (call.status === 'error') { repaint(); continue; }
+      if (state.stopTools) { call.status = 'denied'; call.result = 'Cancelled by the user.'; repaint(); continue; }
+      const key = `${call.server}/${call.tool}`;
+      if (!toolAllow().has(key)) {
+        call.status = 'awaiting'; repaint(); $('#status').textContent = 'Waiting for your approval…';
+        const choice = await new Promise((res) => approvals.set(call.id, res));
+        approvals.delete(call.id);
+        if (choice === 'always') { const a = toolAllow(); a.add(key); saveAllow(a); }
+        if (choice === 'deny') { call.status = 'denied'; call.result = state.stopTools ? 'Cancelled by the user.' : 'The user denied permission to run this tool.'; repaint(); continue; }
+      }
+      call.status = 'running'; repaint(); $('#status').textContent = `Running ${call.tool}…`;
+      try {
+        const r = await api('/mcp/call', { method: 'POST', body: { server: call.server, tool: call.tool, arguments: call.arguments } });
+        call.status = r.isError ? 'error' : 'done'; call.result = r.text;
+      } catch (e) { call.status = 'error'; call.result = 'Tool call failed: ' + (e.message || e); }
+      repaint();
+    }
+  } finally { state.toolsBusy = false; setBusy(false); }
+  return !state.stopTools && state.chat === c;
+}
+$('#messages').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tc]'); if (!b) return;
+  const res = approvals.get(b.closest('.toolcall').dataset.call);
+  if (res) res(b.dataset.tc);
+});
+
+let mcpBusy = false;
+function renderMcp() {
+  $('#toolsOn').checked = state.toolsOn;
+  const box = $('#mcpList'); box.innerHTML = '';
+  for (const srv of state.mcp) {
+    const d = document.createElement('div'); d.className = 'mcp';
+    const where = srv.transport === 'http' ? srv.url : srv.command;
+    d.innerHTML = `<div class="mh"><span class="dot ${srv.enabled ? srv.status : ''}" title="${srv.enabled ? srv.status : 'disabled'}"></span><span class="nm">${esc(srv.name)}</span>
+      <span class="meta">${srv.enabled && srv.status === 'connected' ? srv.tools.length + ' tools' : srv.enabled ? srv.status : 'off'}</span>
+      <label class="toggle"><input type="checkbox" data-a="en" ${srv.enabled ? 'checked' : ''}> On</label>
+      <button type="button" class="icon" data-a="rc" title="Reconnect">↻</button><button type="button" class="icon" data-a="rm" title="Remove">✕</button></div>
+      <div class="meta" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(where)}</div>
+      ${srv.error ? `<div class="err">${esc(srv.error)}</div>` : ''}
+      ${srv.tools.length ? `<details><summary>${srv.tools.length} tools</summary>${srv.tools.map((t) => `<div><b>${esc(t.name)}</b> ${esc(t.description).slice(0, 160)}</div>`).join('')}</details>` : ''}`;
+    d.querySelector('[data-a=en]').onchange = async (e) => { await mcpAct(() => api('/mcp/' + srv.id, { method: 'PUT', body: { enabled: e.target.checked } })); };
+    d.querySelector('[data-a=rc]').onclick = () => mcpAct(() => api(`/mcp/${srv.id}/reconnect`, { method: 'POST' }));
+    d.querySelector('[data-a=rm]').onclick = async () => {
+      if (!confirm(`Remove "${srv.name}"? Its process will be stopped.`)) return;
+      await mcpAct(() => api('/mcp/' + srv.id, { method: 'DELETE' }));
+      const a = toolAllow(); for (const k of [...a]) if (k.startsWith(srv.id + '/')) a.delete(k); saveAllow(a); renderMcp();
+    };
+    box.appendChild(d);
+  }
+  const al = $('#allowList'); al.innerHTML = '';
+  for (const key of toolAllow()) {
+    const [sid, ...t] = key.split('/'), srv = state.mcp.find((x) => x.id === sid);
+    const row = document.createElement('div'); row.className = 'allow';
+    row.innerHTML = `<code>${esc(srv ? srv.name : 'removed server')} › ${esc(t.join('/'))}</code><button type="button" class="ghost">Revoke</button>`;
+    row.querySelector('button').onclick = () => { const a = toolAllow(); a.delete(key); saveAllow(a); renderMcp(); };
+    al.appendChild(row);
+  }
+  if (!al.children.length) al.innerHTML = '<span class="sub">None. Choose “Always allow” on a tool call to add one.</span>';
+}
+async function mcpAct(fn) {
+  if (mcpBusy) return; mcpBusy = true; $('#mcMsg').textContent = 'Working…';
+  try { await fn(); } catch (e) { toast(e.message); }
+  await loadMcp(); mcpBusy = false; $('#mcMsg').textContent = ''; renderMcp();
+}
+const mcType = () => document.querySelector('input[name=mcT]:checked').value;
+for (const r of document.querySelectorAll('input[name=mcT]')) r.onchange = () => { $('#mcCmd').hidden = mcType() === 'http'; $('#mcUrl').hidden = mcType() !== 'http'; };
+$('#toolsBtn').onclick = async () => { await loadMcp(); renderMcp(); $('#toolsDlg').showModal(); };
+$('#toolsClose').onclick = () => $('#toolsDlg').close();
+$('#toolsOn').onchange = (e) => { state.toolsOn = e.target.checked; pref('tools', state.toolsOn ? '1' : '0'); updateToolsBtn(); };
+$('#mcAdd').onclick = async () => {
+  const env = {};
+  for (const line of $('#mcEnv').value.split('\n')) { const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/); if (m) env[m[1]] = m[2]; }
+  const body = { name: $('#mcName').value, transport: mcType(), command: $('#mcCmd').value, url: $('#mcUrl').value, env };
+  if (!body.name.trim()) return toast('Give the server a name');
+  const what = body.transport === 'http' ? body.url : body.command;
+  if (!what.trim()) return toast(body.transport === 'http' ? 'Enter a URL' : 'Enter a command');
+  if (!confirm(`Run this on your computer?\n\n${what}\n\nOnly continue if you trust it.`)) return;
+  await mcpAct(async () => {
+    const srv = await api('/mcp', { method: 'POST', body });
+    $('#mcName').value = ''; $('#mcCmd').value = ''; $('#mcUrl').value = ''; $('#mcEnv').value = '';
+    if (srv.status !== 'connected') toast('Added, but it could not connect — see the error below');
+  });
+};
+
+
 // ---- attachments ---------------------------------------------------------
 const MAX_TEXT = 200000; // chars of text kept per attached file
 const isImage = (f) => /^image\/(png|jpe?g|webp|gif|bmp)$/.test(f.type);
@@ -427,7 +575,11 @@ function buildContent(m) {
   const files = (m.attachments || []).filter((a) => a.kind === 'text');
   return (m.content || '') + files.map((a) => `\n\n<attachment name="${a.name}">\n${a.text}\n</attachment>`).join('');
 }
-const toOllama = ({ role, content, attachments, ...rest }) => {
+const toOllama = ({ role, content, attachments, toolCalls }) => {
+  if (role === 'assistant' && toolCalls && toolCalls.length) return [
+    { role: 'assistant', content: content || '', tool_calls: toolCalls.map((c) => ({ function: { name: c.name, arguments: c.arguments } })) },
+    ...toolCalls.map((c) => ({ role: 'tool', tool_name: c.name, content: c.result || '(no result)' })),
+  ];
   const images = (attachments || []).filter((a) => a.kind === 'image').map((a) => a.data);
   return { role, content: buildContent({ content, attachments }), ...(images.length ? { images } : {}) };
 };
@@ -486,7 +638,7 @@ function paint(el, m, live) {
       c.style.display = m.content ? '' : 'none';
     }
   }
-  else c.innerHTML = thinkHTML(m, live) + markdown(m.content || '') + (m.error ? `<p class="err">${esc(m.error)}</p>` : '');
+  else c.innerHTML = thinkHTML(m, live) + toolsHTML(m) + markdown(m.content || '') + (m.error ? `<p class="err">${esc(m.error)}</p>` : '');
   c.classList.toggle('cursor', !!live);
   const tb = c.querySelector('details.think[open] .tbody');
   if (tb && live && !m.content) tb.scrollTop = tb.scrollHeight;
@@ -592,14 +744,17 @@ function settings(promptChars = 0) {
 }
 function newChat() {
   if (state.streaming) state.streaming.abort();
+  if (state.toolsBusy) cancelTools();
   closeArtifact();
   state.chat = { id: null, title: 'New Chat', model: $('#modelSelect').value, system: $('#systemPrompt').value, style: $('#styleSelect').value, project: state.project, messages: [] };
   renderAll(); renderSidebar(); $('#input').focus();
 }
 async function openChat(id) {
   if (state.streaming) state.streaming.abort();
+  if (state.toolsBusy) cancelTools();
   closeArtifact();
   state.chat = await api('/chats/' + id);
+  for (const m of state.chat.messages) for (const tc of m.toolCalls || []) if (['queued', 'awaiting', 'running'].includes(tc.status)) { tc.status = 'error'; tc.result = tc.result || 'Interrupted before it finished.'; }
   if ((state.chat.project || null) !== state.project) { await setProject(state.chat.project || null); refreshChats(); }
   if (state.chat.model) $('#modelSelect').value = state.chat.model;
   $('#systemPrompt').value = state.chat.system || '';
@@ -634,17 +789,20 @@ async function generate(fork) {
   if (fork) finishFork(fork, reply);
   const caps = (state.models.find((m) => m.id === c.model) || { caps: [] }).caps;
   const canThink = caps.includes('thinking');
+  const toolSet = state.toolsOn && trailingToolRounds(c.messages) < MAX_TOOL_ROUNDS ? buildTools() : null;
+  if (toolSet && !caps.includes('tools')) { if (!state.warnedTools) toast(`${c.model} does not support tools — answering without them`); state.warnedTools = true; }
+  const useTools = toolSet && caps.includes('tools') ? toolSet : null;
   renderAll();
   const el = $('#messages').lastElementChild;
   const system = fullSystem(c.system);
-  const wire = c.messages.slice(0, -1).map(toOllama);
+  const wire = c.messages.slice(0, -1).flatMap(toOllama);
   const ac = state.streaming = new AbortController();
   setBusy(true);
   const t0 = performance.now(); let tokens = 0;
   try {
     const r = await fetch('/api/chat', {
       method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: c.model, system, ...(canThink ? { think: $('#thinkToggle').checked } : {}), options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
+      body: JSON.stringify({ model: c.model, system, ...(canThink ? { think: $('#thinkToggle').checked } : {}), ...(useTools ? { tools: useTools.defs } : {}), options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
         messages: wire }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
@@ -669,6 +827,7 @@ async function generate(fork) {
           }
           if (j.message.content && thinkT0.has(reply) && reply.thinkMs == null) reply.thinkMs = Math.round(performance.now() - thinkT0.get(reply));
           if (j.message.content) tokens++;
+          if (j.message.tool_calls) reply.toolCalls = (reply.toolCalls || []).concat(j.message.tool_calls.map((tc) => registerCall(tc, useTools && useTools.map)));
         }
         if (!raf) raf = requestAnimationFrame(flush);
       }
@@ -677,10 +836,16 @@ async function generate(fork) {
     if (e.name !== 'AbortError') reply.error = String(e.message || e);
   }
   state.streaming = null; setBusy(false);
-  if (!reply.content && !reply.error && !reply.thinking) { c.messages.pop(); if (fork) undoFork(fork); }
+  if (reply.toolCalls && (reply.error || ac.signal.aborted)) delete reply.toolCalls; // never run tools from a failed/stopped turn
+  if (!reply.content && !reply.error && !reply.thinking && !reply.toolCalls) { c.messages.pop(); if (fork) undoFork(fork); }
   if (reply.thinking && reply.thinkMs == null && thinkT0.has(reply)) reply.thinkMs = Math.round(performance.now() - thinkT0.get(reply));
   paint(el, reply, false);
   renderAll();
+  if (reply.toolCalls) {
+    const go = await runToolCalls(c, reply);
+    await persist().catch(() => {});
+    if (go) return generate(); // let the model answer using the tool results
+  }
   if (!reply.error) maybeAutoOpenArtifact();
   if (tokens) $('#status').textContent = `${tokens} chunks in ${((performance.now() - t0) / 1000).toFixed(1)}s`;
   persist().then(() => { if (c.id && !c.titled && reply.content && !state.temp) autoTitle(c, reply); }).catch((e) => toast('Save failed: ' + e.message));
@@ -688,7 +853,7 @@ async function generate(fork) {
 
 async function send(text) {
   text = text.trim();
-  if ((!text && !state.pending.length) || state.streaming) return;
+  if ((!text && !state.pending.length) || state.streaming || state.toolsBusy) return;
   await state.ready; // model list may still be loading right after page load
   if (state.processing) return toast('Still reading attachments…');
   const atts = state.pending;
@@ -724,7 +889,7 @@ $('#input').addEventListener('paste', (e) => {
   window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) dz.classList.remove('drag'); });
   window.addEventListener('drop', (e) => { if (e.dataTransfer?.files.length) { e.preventDefault(); dz.classList.remove('drag'); addFiles([...e.dataTransfer.files]); } });
 }
-$('#stopBtn').onclick = () => state.streaming && state.streaming.abort();
+$('#stopBtn').onclick = () => { if (state.streaming) state.streaming.abort(); if (state.toolsBusy) cancelTools(); };
 $('#newChat').onclick = newChat;
 $('#search').addEventListener('input', () => { clearTimeout($('#search').t); $('#search').t = setTimeout(refreshChats, 200); });
 $('#tempToggle').onchange = (e) => { state.temp = e.target.checked; toast(state.temp ? 'Temporary chat: nothing will be saved' : 'Chats are saved again'); };
@@ -800,6 +965,8 @@ state.ready = (async function init() {
   }
   await loadProjects();
   await loadSettings();
+  state.toolsOn = pref('tools') !== '0';
+  loadMcp();
   newChat();
   refreshChats();
 })();

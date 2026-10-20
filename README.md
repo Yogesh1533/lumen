@@ -28,6 +28,7 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 - Auto titles: chats are named by the model after the first exchange (rename a chat to keep your own title)
 - Styles: Concise / Explanatory / Formal / Friendly presets plus your own custom styles, chosen per chat from the header
 - Memory (🧠 in the sidebar): facts the assistant carries into every chat. Add them by hand, with the Remember button on a message, or by typing "Remember that …". Memory is never used or saved in Temporary chats, and can be switched off
+- Tools via MCP (🔧 Tools in the header): connect Model Context Protocol servers (a local command, or a remote Streamable-HTTP URL) and let tool-capable models call them. Every call shows an approval card (Allow once / Always allow / Deny); results appear in the chat and are fed back to the model, for up to 8 rounds per turn. Stop cancels a pending approval
 - Safe markdown rendering (code blocks with copy, lists, tables, quotes)
 
 ## API
@@ -39,3 +40,11 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 | `GET/POST/DELETE /api/chats` | list (`?q=` search) / create / delete all |
 | `GET/PUT/DELETE /api/chats/:id` | read / update / delete |
 | `GET /api/chats/export` | download all chats |
+
+## Security notes
+
+- Lumen listens on `127.0.0.1` only and has no login: anyone who can reach that port on this computer can use it.
+- MCP servers are programs that run as you. Only add servers you trust. Their config (including any environment variables you enter, such as API keys) is stored in plain text in `data/settings.json`.
+- Because Lumen can launch programs, the API rejects cross-site requests (mismatched `Origin`, `Sec-Fetch-Site: cross-site`, non-JSON bodies) and unexpected `Host` headers (DNS rebinding), so a web page you visit cannot drive it.
+- Tool calls always need your approval unless you chose "Always allow" for that exact tool (revoke in 🔧 Tools).
+- Artifact previews are sandboxed with an opaque origin and cannot reach the API or your chats.
