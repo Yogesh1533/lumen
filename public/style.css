@@ -145,3 +145,37 @@ body.chatting #welcome { display: none; }
 .content pre .bar button[data-open-art] { color: #fff; background: var(--accent); border-radius: 6px; }
 #controls label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
 @media (max-width: 760px) { #artifact { position: fixed; z-index: 6; inset: 0; width: 100%; min-width: 0; } }
+
+/* projects */
+.group-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: -6px; }
+.group-row .group { padding-bottom: 0; }
+#projects { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
+#projects:empty::after { content: "No projects yet"; font-size: 12px; color: var(--muted); padding: 2px 8px; }
+.proj { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+.proj:hover { background: var(--panel2); }
+.proj.active { background: var(--accent); color: var(--accent-fg); }
+.proj .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj .n { font-size: 11px; opacity: .7; }
+.proj button { padding: 0 5px; font-size: 13px; opacity: 0; color: inherit; }
+.proj:hover button, .proj.active button { opacity: .85; }
+.pchip { display: inline-flex; align-items: center; background: var(--user); border-radius: 999px; font-size: 13px; font-weight: 600; max-width: 260px; }
+.pchip[hidden] { display: none; }
+.pchip button { padding: 3px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pchip button + button { padding: 3px 9px 3px 0; color: var(--muted); }
+dialog { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 16px; padding: 22px; width: min(560px, calc(100vw - 32px)); box-shadow: 0 20px 60px #0005; }
+dialog::backdrop { background: #0006; }
+dialog h2 { margin: 0 0 14px; font-size: 18px; }
+dialog label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+dialog input[type=text], dialog input:not([type]) { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%; }
+.sub { font-weight: 400; font-size: 12px; color: var(--muted); }
+.files-head { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; }
+.files-head .sub { flex: 1; }
+#pFiles { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
+#pFiles:empty::after { content: "No files. Add documents the assistant should always know about."; font-size: 12px; color: var(--muted); }
+.pfile { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+.pfile .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pfile .meta { color: var(--muted); font-size: 12px; }
+.warn { margin-top: 10px; font-size: 12px; color: #a15c00; background: #ffb30020; border-radius: 8px; padding: 8px 10px; }
+:root[data-theme="dark"] .warn { color: #ffcc66; }
+.dlg-actions { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
+#moveSel { width: 100%; }

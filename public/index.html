@@ -16,6 +16,8 @@
     </div>
     <button id="newChat" class="primary wide">＋ New Chat</button>
     <input id="search" type="search" placeholder="Search chats…" autocomplete="off">
+    <div class="group-row"><span class="group">Projects</span><button id="newProject" class="icon" title="New project">＋</button></div>
+    <div id="projects"></div>
     <nav id="chatList" aria-label="Chat history"></nav>
     <div class="side-bottom">
       <button id="exportBtn" class="ghost">Export</button>
@@ -27,6 +29,7 @@
   <main>
     <header>
       <button id="openSide" class="icon" title="Open sidebar">☰</button>
+      <span id="projChip" class="pchip" hidden><button type="button" id="projOpen"></button><button type="button" id="projLeave" title="Leave project">✕</button></span>
       <select id="modelSelect" aria-label="Model"></select>
       <div class="spacer"></div>
       <label class="toggle" title="Temporary chats are not saved"><input type="checkbox" id="tempToggle"> Temporary</label>
@@ -89,6 +92,32 @@
     </label>
   </aside>
 </div>
+<dialog id="projDlg">
+  <form method="dialog" id="projForm">
+    <h2>Project</h2>
+    <label>Name <input id="pName" maxlength="80" required></label>
+    <label>Instructions <span class="sub">Applied to every chat in this project</span>
+      <textarea id="pInstr" rows="5" placeholder="e.g. You are a senior reviewer for our Go services. Answer tersely and cite file names."></textarea>
+    </label>
+    <div class="files-head"><strong>Knowledge</strong><span id="pTokens" class="sub"></span><button type="button" id="pAddFile" class="ghost">Add files</button></div>
+    <input id="pFileInput" type="file" multiple hidden accept=".pdf,.txt,.md,.csv,.json,.js,.ts,.py,.html,.css,.yaml,.yml,.xml,.log,.sh,.sql,.go,.rs,.java,.c,.cpp,.h,.rb,.php,.swift,.kt,text/*">
+    <div id="pFiles"></div>
+    <div id="pWarn" class="warn" hidden></div>
+    <div class="dlg-actions">
+      <button type="button" id="pDelete" class="ghost danger">Delete project</button>
+      <span class="spacer"></span>
+      <button type="button" id="pCancel" class="ghost">Close</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="moveDlg">
+  <form method="dialog" id="moveForm">
+    <h2>Move chat</h2>
+    <select id="moveSel"></select>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="moveCancel" class="ghost">Cancel</button><button type="submit" class="primary">Move</button></div>
+  </form>
+</dialog>
 <div id="toast" role="status"></div>
 <script src="/app.js"></script>
 </body>

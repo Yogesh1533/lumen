@@ -22,6 +22,7 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 - Temporary chats (not saved), suggested prompts, light/dark theme, mobile layout
 - Attachments: drag/drop, paste, or pick images (sent to vision models), PDFs and text/code files (inlined as context)
 - Artifacts: HTML, SVG and Markdown code blocks open in a side panel (Preview/Code tabs, version stepping, copy, download). Previews run in a sandboxed iframe with an opaque origin, so generated scripts cannot reach the app, its API or your chats
+- Projects: group chats under a project with its own instructions and knowledge files (text, code, PDF). Both are added to every chat's system prompt, and the context window grows automatically to fit (up to 32k). Chats outside a project never see its knowledge. Deleting a project keeps its chats
 - Safe markdown rendering (code blocks with copy, lists, tables, quotes)
 
 ## API
