@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumen</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%236d5efc'/%3E%3Ccircle cx='16' cy='16' r='6' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-top">
+      <div class="brand"><span class="logo"></span>Lumen</div>
+      <button id="toggleSide" class="icon" title="Toggle sidebar">☰</button>
+    </div>
+    <button id="newChat" class="primary wide">＋ New Chat</button>
+    <input id="search" type="search" placeholder="Search chats…" autocomplete="off">
+    <nav id="chatList" aria-label="Chat history"></nav>
+    <div class="side-bottom">
+      <button id="exportBtn" class="ghost">Export</button>
+      <button id="clearBtn" class="ghost danger">Clear all</button>
+      <button id="themeBtn" class="icon" title="Toggle theme">◐</button>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <button id="openSide" class="icon" title="Open sidebar">☰</button>
+      <select id="modelSelect" aria-label="Model"></select>
+      <div class="spacer"></div>
+      <label class="toggle" title="Temporary chats are not saved"><input type="checkbox" id="tempToggle"> Temporary</label>
+      <button id="controlsBtn" class="ghost">Controls</button>
+    </header>
+
+    <section id="messages" aria-live="polite"></section>
+
+    <section id="welcome">
+      <div class="hero"><span class="logo big"></span><h1>How can I help you today?</h1></div>
+      <div id="suggestions"></div>
+    </section>
+
+    <form id="composer">
+      <div class="box">
+        <textarea id="input" rows="1" placeholder="Send a message…  (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="sendBtn" class="send" type="submit" title="Send">↑</button>
+        <button id="stopBtn" class="send stop" type="button" title="Stop" hidden>■</button>
+      </div>
+      <div class="hint" id="status"></div>
+    </form>
+  </main>
+
+  <aside id="controls" hidden>
+    <div class="side-top"><strong>Controls</strong><button id="closeControls" class="icon">✕</button></div>
+    <label>System prompt
+      <textarea id="systemPrompt" rows="5" placeholder="You are a helpful assistant."></textarea>
+    </label>
+    <label>Temperature <output id="tempOut">0.8</output>
+      <input id="temperature" type="range" min="0" max="2" step="0.05" value="0.8">
+    </label>
+    <label>Top P <output id="topPOut">0.9</output>
+      <input id="topP" type="range" min="0" max="1" step="0.05" value="0.9">
+    </label>
+    <label>Context length
+      <input id="numCtx" type="number" min="512" step="512" value="4096">
+    </label>
+    <label>Max tokens (blank = unlimited)
+      <input id="numPredict" type="number" min="1" placeholder="unlimited">
+    </label>
+  </aside>
+</div>
+<div id="toast" role="status"></div>
+<script src="/app.js"></script>
+</body>
+</html>
