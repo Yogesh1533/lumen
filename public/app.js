@@ -331,6 +331,11 @@ const toOllama = ({ role, content, attachments, ...rest }) => {
 };
 
 // ---- rendering -----------------------------------------------------------
+function versionsHTML(m) {
+  if (!m.fk || m.fk.tails.length < 2) return '';
+  const { cur, tails } = m.fk;
+  return `<div class="vers"><button type="button" data-act="vprev" title="Previous version" ${cur === 0 ? 'disabled' : ''}>‹</button><span>${cur + 1}/${tails.length}</span><button type="button" data-act="vnext" title="Next version" ${cur === tails.length - 1 ? 'disabled' : ''}>›</button></div>`;
+}
 function msgEl(m, idx) {
   const el = document.createElement('div');
   el.className = 'msg ' + m.role; el.dataset.idx = idx;
@@ -338,6 +343,7 @@ function msgEl(m, idx) {
   el.innerHTML = `<div class="avatar">${isUser ? 'You' : 'AI'}</div>
     <div class="body"><div class="who">${isUser ? 'You' : esc(state.chat.model || 'Assistant')}</div>
     <div class="content"></div>
+    ${versionsHTML(m)}
     <div class="tools">
       <button data-act="copy">Copy</button>
       ${isUser ? '<button data-act="edit">Edit</button>' : '<button data-act="regen">Regenerate</button>'}
@@ -346,6 +352,22 @@ function msgEl(m, idx) {
   paint(el, m);
   return el;
 }
+// Reasoning block: open while the model is still thinking, collapsed (and timed) once the answer starts.
+const thinkOpen = new WeakMap(), thinkT0 = new WeakMap();
+function thinkHTML(m, live) {
+  if (!m.thinking) return '';
+  const thinking = !!live && !m.content;
+  const secs = m.thinkMs != null ? m.thinkMs / 1000 : thinkT0.has(m) ? (performance.now() - thinkT0.get(m)) / 1000 : null;
+  const label = thinking ? `Thinking… ${secs != null ? secs.toFixed(1) + 's' : ''}` : `Thought${secs != null ? ' for ' + secs.toFixed(1) + 's' : ''}`;
+  const open = thinkOpen.has(m) ? thinkOpen.get(m) : thinking;
+  return `<details class="think${thinking ? ' live' : ''}" data-think${open ? ' open' : ''}><summary>${label}</summary><div class="tbody">${esc(m.thinking)}</div></details>`;
+}
+// Remember only deliberate user toggles (clicks), not the automatic open-while-thinking state.
+$('#messages').addEventListener('click', (e) => {
+  const sum = e.target.closest('details[data-think] > summary'); if (!sum) return;
+  const d = sum.parentElement, m = state.chat.messages[+d.closest('.msg').dataset.idx];
+  setTimeout(() => { if (m) thinkOpen.set(m, d.open); });
+});
 function paint(el, m, live) {
   const c = el.querySelector('.content');
   if (m.role === 'user') {
@@ -362,9 +384,60 @@ function paint(el, m, live) {
       c.style.display = m.content ? '' : 'none';
     }
   }
-  else c.innerHTML = (m.thinking ? `<div class="think">${esc(m.thinking)}</div>` : '') + markdown(m.content || '') + (m.error ? `<p class="err">${esc(m.error)}</p>` : '');
+  else c.innerHTML = thinkHTML(m, live) + markdown(m.content || '') + (m.error ? `<p class="err">${esc(m.error)}</p>` : '');
   c.classList.toggle('cursor', !!live);
+  const tb = c.querySelector('details.think[open] .tbody');
+  if (tb && live && !m.content) tb.scrollTop = tb.scrollHeight;
 }
+// ---- branching: the head message of a fork carries `fk` = { tails, cur }.
+// tails[i] is a saved snapshot of the messages from that head onward; tails[cur] is null (it is the live chat).
+function beginFork(i) {
+  const head = state.chat.messages[i];
+  const fk = head.fk || { tails: [null], cur: 0 };
+  const tail = state.chat.messages.slice(i);
+  delete head.fk;
+  state.chat.messages.length = i;
+  return { i, fk, tail, cur: fk.cur };
+}
+function finishFork(spec, newHead) {
+  spec.fk.tails[spec.fk.cur] = spec.tail;
+  spec.fk.tails.push(null); spec.fk.cur = spec.fk.tails.length - 1;
+  newHead.fk = spec.fk;
+}
+function undoFork(spec) {
+  const { fk } = spec;
+  if (fk.cur !== spec.cur) { fk.tails.pop(); fk.cur = spec.cur; fk.tails[fk.cur] = null; }
+  spec.tail[0].fk = fk;
+  state.chat.messages.push(...spec.tail);
+}
+function switchBranch(i, d) {
+  const msgs = state.chat.messages, fk = msgs[i].fk, j = fk ? fk.cur + d : -1;
+  if (!fk || j < 0 || j >= fk.tails.length) return;
+  const tail = msgs.slice(i); delete tail[0].fk;
+  fk.tails[fk.cur] = tail;
+  const next = fk.tails[j]; fk.tails[j] = null; fk.cur = j;
+  msgs.length = i; msgs.push(...next); msgs[i].fk = fk;
+  closeArtifact(); renderAll(); persist();
+}
+function startEdit(el, m) {
+  const c = el.querySelector('.content');
+  c.style.display = ''; c.classList.add('editing');
+  c.innerHTML = '<textarea class="editbox"></textarea><div class="editbar"><button type="button" class="ghost" data-act="editcancel">Cancel</button><button type="button" class="primary" data-act="editsave">Save &amp; submit</button></div>';
+  const ta = c.querySelector('textarea'); ta.value = m.content; ta.focus();
+}
+// Short model-written title after the first exchange, unless the user already named the chat.
+async function autoTitle(c, reply) {
+  c.titled = true;
+  try {
+    const first = c.messages.find((m) => m.role === 'user');
+    const { title } = await api('/title', { method: 'POST', body: { model: c.model, user: first ? first.content || (first.attachments && first.attachments[0].name) : '', assistant: reply.content } });
+    if (!title) return;
+    c.title = title;
+    await api('/chats/' + c.id, { method: 'PUT', body: { title, titled: true } });
+    refreshChats();
+  } catch { /* keep the fallback title */ }
+}
+
 function renderAll() {
   const box = $('#messages'); box.innerHTML = '';
   state.chat.messages.forEach((m, i) => box.appendChild(msgEl(m, i)));
@@ -387,7 +460,7 @@ function renderSidebar() {
       const a = e.target.dataset.a;
       if (a === 'pin') { await api('/chats/' + c.id, { method: 'PUT', body: { pinned: !c.pinned } }); return refreshChats(); }
       if (a === 'mv') return moveChat(c);
-      if (a === 'ren') { const t = prompt('Rename chat', c.title); if (t) { await api('/chats/' + c.id, { method: 'PUT', body: { title: t } }); refreshChats(); } return; }
+      if (a === 'ren') { const t = prompt('Rename chat', c.title); if (t) { await api('/chats/' + c.id, { method: 'PUT', body: { title: t, titled: true } }); refreshChats(); } return; }
       if (a === 'del') {
         if (!confirm('Delete this chat?')) return;
         await api('/chats/' + c.id, { method: 'DELETE' });
@@ -449,12 +522,15 @@ function setBusy(b) {
   $('#status').textContent = b ? 'Generating…' : '';
 }
 
-async function generate() {
+async function generate(fork) {
   const c = state.chat;
   c.model = $('#modelSelect').value; c.system = $('#systemPrompt').value.trim();
-  if (!c.model) return toast('No model selected — is Ollama running?');
+  if (!c.model) { if (fork) { undoFork(fork); renderAll(); } return toast('No model selected — is Ollama running?'); }
   const reply = { role: 'assistant', content: '' };
   c.messages.push(reply);
+  if (fork) finishFork(fork, reply);
+  const caps = (state.models.find((m) => m.id === c.model) || { caps: [] }).caps;
+  const canThink = caps.includes('thinking');
   renderAll();
   const el = $('#messages').lastElementChild;
   const system = fullSystem(c.system);
@@ -465,7 +541,7 @@ async function generate() {
   try {
     const r = await fetch('/api/chat', {
       method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: c.model, system, options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
+      body: JSON.stringify({ model: c.model, system, ...(canThink ? { think: $('#thinkToggle').checked } : {}), options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
         messages: wire }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
@@ -484,7 +560,11 @@ async function generate() {
         if (j.error) throw new Error(j.error);
         if (j.message) {
           reply.content += j.message.content || '';
-          if (j.message.thinking) reply.thinking = (reply.thinking || '') + j.message.thinking;
+          if (j.message.thinking) {
+            if (!thinkT0.has(reply)) thinkT0.set(reply, performance.now());
+            reply.thinking = (reply.thinking || '') + j.message.thinking;
+          }
+          if (j.message.content && thinkT0.has(reply) && reply.thinkMs == null) reply.thinkMs = Math.round(performance.now() - thinkT0.get(reply));
           if (j.message.content) tokens++;
         }
         if (!raf) raf = requestAnimationFrame(flush);
@@ -494,12 +574,13 @@ async function generate() {
     if (e.name !== 'AbortError') reply.error = String(e.message || e);
   }
   state.streaming = null; setBusy(false);
-  if (!reply.content && !reply.error && !reply.thinking) c.messages.pop();
+  if (!reply.content && !reply.error && !reply.thinking) { c.messages.pop(); if (fork) undoFork(fork); }
+  if (reply.thinking && reply.thinkMs == null && thinkT0.has(reply)) reply.thinkMs = Math.round(performance.now() - thinkT0.get(reply));
   paint(el, reply, false);
   renderAll();
   if (!reply.error) maybeAutoOpenArtifact();
   if (tokens) $('#status').textContent = `${tokens} chunks in ${((performance.now() - t0) / 1000).toFixed(1)}s`;
-  persist().catch((e) => toast('Save failed: ' + e.message));
+  persist().then(() => { if (c.id && !c.titled && reply.content && !state.temp) autoTitle(c, reply); }).catch((e) => toast('Save failed: ' + e.message));
 }
 
 async function send(text) {
@@ -542,7 +623,13 @@ $('#stopBtn').onclick = () => state.streaming && state.streaming.abort();
 $('#newChat').onclick = newChat;
 $('#search').addEventListener('input', () => { clearTimeout($('#search').t); $('#search').t = setTimeout(refreshChats, 200); });
 $('#tempToggle').onchange = (e) => { state.temp = e.target.checked; toast(state.temp ? 'Temporary chat: nothing will be saved' : 'Chats are saved again'); };
-$('#modelSelect').onchange = () => { state.chat.model = $('#modelSelect').value; pref('model', state.chat.model); };
+function updateThinkUI() {
+  const m = state.models.find((x) => x.id === $('#modelSelect').value);
+  $('#thinkWrap').hidden = !(m && m.caps.includes('thinking'));
+}
+$('#thinkToggle').checked = pref('think') !== '0';
+$('#thinkToggle').onchange = (e) => pref('think', e.target.checked ? '1' : '0');
+$('#modelSelect').onchange = () => { updateThinkUI(); state.chat.model = $('#modelSelect').value; pref('model', state.chat.model); };
 $('#systemPrompt').onchange = () => { state.chat.system = $('#systemPrompt').value; };
 $('#controlsBtn').onclick = () => { $('#controls').hidden = !$('#controls').hidden; };
 $('#closeControls').onclick = () => { $('#controls').hidden = true; };
@@ -569,9 +656,23 @@ $('#messages').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-act]'); if (!btn || state.streaming) return;
   const idx = +btn.closest('.msg').dataset.idx, m = state.chat.messages[idx], act = btn.dataset.act;
   if (act === 'copy') { await navigator.clipboard.writeText(m.content); toast('Copied'); }
-  else if (act === 'del') { state.chat.messages.splice(idx, 1); renderAll(); persist(); }
-  else if (act === 'edit') { state.chat.messages.length = idx; renderAll(); state.pending = m.attachments || []; renderChips(); $('#input').value = m.content; autosize(); $('#input').focus(); }
-  else if (act === 'regen') { state.chat.messages.length = idx; await generate(); }
+  else if (act === 'del') {
+    if (m.fk && m.fk.tails.length > 1 && !confirm('This message has other versions. Delete them all?')) return;
+    state.chat.messages.splice(idx, 1); renderAll(); persist();
+  }
+  else if (act === 'edit') startEdit(btn.closest('.msg'), m);
+  else if (act === 'editcancel') renderAll();
+  else if (act === 'editsave') {
+    const text = btn.closest('.msg').querySelector('.editbox').value.trim();
+    if (!text && !(m.attachments || []).length) return;
+    const spec = beginFork(idx), nm = { role: 'user', content: text };
+    if (m.attachments) nm.attachments = m.attachments;
+    state.chat.messages.push(nm); finishFork(spec, nm);
+    renderAll(); await generate();
+  }
+  else if (act === 'regen') { const spec = beginFork(idx); await generate(spec); }
+  else if (act === 'vprev') switchBranch(idx, -1);
+  else if (act === 'vnext') switchBranch(idx, 1);
 });
 
 // ---- boot ----------------------------------------------------------------
@@ -585,6 +686,7 @@ state.ready = (async function init() {
     state.models = models;
     sel.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
     const saved = pref('model'); if (saved && models.some((m) => m.id === saved)) sel.value = saved;
+    updateThinkUI();
     if (!models.length) $('#status').textContent = 'No models found. Run: ollama pull <model>';
   } catch (e) {
     sel.innerHTML = '<option value="">Ollama unreachable</option>';

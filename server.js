@@ -95,6 +95,19 @@ async function api(req, res, url) {
     }
   }
 
+  // Short chat title from the first exchange (non-streaming, thinking off for speed).
+  if (parts[0] === 'title' && m === 'POST') {
+    const b = await readBody(req);
+    try {
+      const r = await fetch(`${OLLAMA}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        model: b.model, stream: false, think: false, options: { temperature: 0.3, num_predict: 30 },
+        messages: [{ role: 'user', content: 'Write a title of 2 to 6 words for this conversation. Reply with only the title, no quotes or punctuation.\n\nUser: ' + String(b.user || '').slice(0, 600) + '\nAssistant: ' + String(b.assistant || '').slice(0, 600) }] }) });
+      const j = await r.json();
+      const title = String((j.message && j.message.content) || '').split('\n')[0].replace(/^["'`*#\s]+|["'`*.\s]+$/g, '').slice(0, 60);
+      return send(res, 200, { title });
+    } catch (e) { return send(res, 502, { error: String(e.message || e) }); }
+  }
+
   // Streaming chat: proxies Ollama /api/chat as NDJSON.
   if (parts[0] === 'chat' && m === 'POST') {
     const body = await readBody(req);
@@ -106,7 +119,8 @@ async function api(req, res, url) {
       messages.push(...body.messages);
       const r = await fetch(`${OLLAMA}/api/chat`, {
         method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: body.model, messages, stream: true, options: body.options || {} }),
+        body: JSON.stringify({ model: body.model, messages, stream: true, options: body.options || {},
+          ...(typeof body.think === 'boolean' ? { think: body.think } : {}) }),
       });
       if (!r.ok) return send(res, r.status, { error: (await r.text()).slice(0, 500) });
       res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
@@ -190,7 +204,7 @@ async function api(req, res, url) {
     if (id && m === 'GET') return send(res, 200, chats[id]);
     if (id && m === 'PUT') {
       const b = await readBody(req);
-      for (const k of ['title', 'model', 'system', 'pinned', 'messages']) if (k in b) chats[id][k] = b[k];
+      for (const k of ['title', 'model', 'system', 'pinned', 'messages', 'titled']) if (k in b) chats[id][k] = b[k];
       if ('project' in b) chats[id].project = projects[b.project] ? b.project : null;
       chats[id].updated = Date.now(); save();
       return send(res, 200, summary(chats[id]));
