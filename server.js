@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { McpManager } = require('./mcp');
+const webtools = require('./webtools');
 const mcp = new McpManager();
 
 const PORT = process.env.PORT || 3100;
@@ -14,6 +15,7 @@ const PUBLIC = path.join(__dirname, 'public');
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json',
+  '.png': 'image/png', '.webmanifest': 'application/manifest+json',
 };
 
 // ---- storage -------------------------------------------------------------
@@ -23,8 +25,8 @@ const PROJ_FILE = path.join(path.dirname(DATA_FILE), 'projects.json');
 let projects = {};
 try { projects = JSON.parse(fs.readFileSync(PROJ_FILE, 'utf8')); } catch { projects = {}; }
 const SETTINGS_FILE = path.join(path.dirname(DATA_FILE), 'settings.json');
-let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [] };
-try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch { /* first run */ }
+let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [], web: { enabled: false, provider: '', searxngUrl: '', braveKey: '' } };
+try { const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); settings = { ...settings, ...saved, web: { ...settings.web, ...(saved.web || {}) } }; } catch { /* first run */ }
 const timers = new Map();
 function write(file, obj) {
   clearTimeout(timers.get(file));
@@ -38,6 +40,11 @@ function write(file, obj) {
 const save = () => write(DATA_FILE, chats);
 const saveProjects = () => write(PROJ_FILE, projects);
 const saveSettings = () => write(SETTINGS_FILE, settings);
+const publicSettings = () => ({ ...settings, web: { ...settings.web, braveKey: '', hasBraveKey: !!settings.web.braveKey } });
+// The built-in "Web" tools appear as a virtual MCP server when enabled.
+const builtinServer = () => settings.web.enabled
+  ? { id: 'builtin', name: 'Web', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: webtools.tools(settings.web) }
+  : null;
 const projectSummary = ({ files, ...p }) => ({ ...p, files: files.map(({ text, ...f }) => ({ ...f, chars: text.length })) });
 const summary = ({ messages, ...c }) => ({ ...c, count: messages.length });
 
@@ -179,7 +186,7 @@ async function api(req, res, url) {
       return cfg;
     };
     const id = parts[1];
-    if (!id && m === 'GET') return send(res, 200, settings.mcpServers.map(view));
+    if (!id && m === 'GET') return send(res, 200, [builtinServer(), ...settings.mcpServers.map(view)].filter(Boolean));
     if (!id && m === 'POST') {
       if (settings.mcpServers.length >= 20) return send(res, 400, { error: 'Too many servers' });
       let cfg;
@@ -190,6 +197,11 @@ async function api(req, res, url) {
     }
     if (parts[0] === 'mcp' && id === 'call' && m === 'POST') {
       const b = await readBody(req);
+      if (b.server === 'builtin') {
+        const bs = builtinServer();
+        if (!bs || !bs.tools.some((t) => t.name === b.tool)) return send(res, 200, { isError: true, text: 'That web tool is not available' });
+        return send(res, 200, await webtools.call(String(b.tool), b.arguments, settings.web));
+      }
       if (!settings.mcpServers.some((c) => c.id === b.server && c.enabled)) return send(res, 404, { error: 'Unknown or disabled server' });
       try { return send(res, 200, await mcp.call(b.server, String(b.tool), b.arguments)); }
       catch (e) { return send(res, 200, { isError: true, text: 'Tool call failed: ' + String(e.message || e).slice(0, 500) }); }
@@ -213,12 +225,24 @@ async function api(req, res, url) {
   }
 
   if (parts[0] === 'settings') {
-    if (m === 'GET') return send(res, 200, settings);
+    if (m === 'GET') return send(res, 200, publicSettings());
     if (m === 'PUT') {
       const b = await readBody(req);
       if (typeof b.memoryEnabled === 'boolean') settings.memoryEnabled = b.memoryEnabled;
+      if (b.web && typeof b.web === 'object') {
+        const w = settings.web;
+        if (typeof b.web.enabled === 'boolean') w.enabled = b.web.enabled;
+        if (['', 'searxng', 'brave'].includes(b.web.provider)) w.provider = b.web.provider;
+        if (typeof b.web.searxngUrl === 'string') {
+          const u = b.web.searxngUrl.trim();
+          if (u && !/^https?:\/\//i.test(u)) return send(res, 400, { error: 'SearXNG URL must start with http:// or https://' });
+          w.searxngUrl = u.slice(0, 300);
+        }
+        if (typeof b.web.braveKey === 'string' && b.web.braveKey.trim()) w.braveKey = b.web.braveKey.trim().slice(0, 200);
+        if (b.web.clearBraveKey) w.braveKey = '';
+      }
       saveSettings();
-      return send(res, 200, settings);
+      return send(res, 200, publicSettings());
     }
   }
 
