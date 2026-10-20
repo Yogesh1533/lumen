@@ -17,16 +17,22 @@ const MIME = {
 // ---- storage -------------------------------------------------------------
 let chats = {};
 try { chats = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { chats = {}; }
-let saveTimer = null;
-function save() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-    const tmp = DATA_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(chats));
-    fs.renameSync(tmp, DATA_FILE);
-  }, 150);
+const PROJ_FILE = path.join(path.dirname(DATA_FILE), 'projects.json');
+let projects = {};
+try { projects = JSON.parse(fs.readFileSync(PROJ_FILE, 'utf8')); } catch { projects = {}; }
+const timers = new Map();
+function write(file, obj) {
+  clearTimeout(timers.get(file));
+  timers.set(file, setTimeout(() => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(obj));
+    fs.renameSync(tmp, file);
+  }, 150));
 }
+const save = () => write(DATA_FILE, chats);
+const saveProjects = () => write(PROJ_FILE, projects);
+const projectSummary = ({ files, ...p }) => ({ ...p, files: files.map(({ text, ...f }) => ({ ...f, chars: text.length })) });
 const summary = ({ messages, ...c }) => ({ ...c, count: messages.length });
 
 const pdfParse = require('pdf-parse/lib/pdf-parse.js'); // skip the package's debug-mode index
@@ -114,11 +120,54 @@ async function api(req, res, url) {
     return;
   }
 
+  if (parts[0] === 'projects') {
+    const id = parts[1];
+    if (!id && m === 'GET') return send(res, 200, Object.values(projects).sort((a, b) => b.updated - a.updated).map(projectSummary));
+    if (!id && m === 'POST') {
+      const b = await readBody(req), now = Date.now();
+      const p = { id: crypto.randomUUID(), name: (b.name || 'Untitled project').slice(0, 80), instructions: b.instructions || '', files: [], created: now, updated: now };
+      projects[p.id] = p; saveProjects();
+      return send(res, 200, p);
+    }
+    const p = projects[id];
+    if (!p) return send(res, 404, { error: 'not found' });
+    if (parts[2] === 'files') {
+      if (m === 'POST') {
+        const b = await readBody(req);
+        if (!b.name || typeof b.text !== 'string') return send(res, 400, { error: 'name and text required' });
+        const f = { id: crypto.randomUUID(), name: String(b.name).slice(0, 200), text: b.text, size: b.size || b.text.length };
+        p.files.push(f); p.updated = Date.now(); saveProjects();
+        const { text, ...meta } = f;
+        return send(res, 200, { ...meta, chars: text.length });
+      }
+      if (m === 'DELETE' && parts[3]) {
+        p.files = p.files.filter((f) => f.id !== parts[3]); p.updated = Date.now(); saveProjects();
+        return send(res, 200, { ok: true });
+      }
+    }
+    if (m === 'GET') return send(res, 200, p);
+    if (m === 'PUT') {
+      const b = await readBody(req);
+      if (typeof b.name === 'string') p.name = b.name.trim().slice(0, 80) || p.name;
+      if (typeof b.instructions === 'string') p.instructions = b.instructions;
+      p.updated = Date.now(); saveProjects();
+      return send(res, 200, projectSummary(p));
+    }
+    if (m === 'DELETE') {
+      for (const c of Object.values(chats)) if (c.project === id) c.project = null; // chats are kept
+      delete projects[id]; saveProjects(); save();
+      return send(res, 200, { ok: true });
+    }
+  }
+
   if (parts[0] === 'chats') {
     const id = parts[1];
     if (!id && m === 'GET') {
       const q = (url.searchParams.get('q') || '').toLowerCase();
       let list = Object.values(chats);
+      const pf = url.searchParams.get('project');
+      if (pf === 'none') list = list.filter((c) => !c.project);
+      else if (pf) list = list.filter((c) => c.project === pf);
       if (q) list = list.filter((c) => c.title.toLowerCase().includes(q) ||
         c.messages.some((x) => x.content.toLowerCase().includes(q)));
       list.sort((a, b) => (b.pinned - a.pinned) || (b.updated - a.updated));
@@ -128,7 +177,7 @@ async function api(req, res, url) {
       const b = await readBody(req);
       const now = Date.now();
       const c = { id: crypto.randomUUID(), title: b.title || 'New Chat', model: b.model || '',
-        system: b.system || '', pinned: false, created: now, updated: now, messages: b.messages || [] };
+        system: b.system || '', project: projects[b.project] ? b.project : null, pinned: false, created: now, updated: now, messages: b.messages || [] };
       chats[c.id] = c; save();
       return send(res, 200, c);
     }
@@ -142,6 +191,7 @@ async function api(req, res, url) {
     if (id && m === 'PUT') {
       const b = await readBody(req);
       for (const k of ['title', 'model', 'system', 'pinned', 'messages']) if (k in b) chats[id][k] = b[k];
+      if ('project' in b) chats[id].project = projects[b.project] ? b.project : null;
       chats[id].updated = Date.now(); save();
       return send(res, 200, summary(chats[id]));
     }

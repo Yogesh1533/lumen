@@ -15,6 +15,9 @@ const state = {
   temp: false,
   pending: [],         // attachments queued in the composer
   processing: 0,       // files still being read
+  projects: [],        // sidebar summaries
+  project: null,       // active project id
+  projectData: null,   // active project incl. knowledge text
 };
 
 // ---- utilities -----------------------------------------------------------
@@ -158,6 +161,116 @@ $('#artDownload').onclick = () => {
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#artifact').hidden) closeArtifact(); });
 
 
+// ---- projects ------------------------------------------------------------
+const MAX_KNOWLEDGE_CHARS = 400000;
+const knowledgeChars = (p) => (p ? p.files.reduce((n, f) => n + (f.text ? f.text.length : f.chars || 0), 0) : 0);
+// Project instructions + knowledge documents + the per-chat system prompt from Controls.
+function fullSystem(chatSystem) {
+  const p = state.projectData, parts = [];
+  if (p && p.instructions.trim()) parts.push(p.instructions.trim());
+  if (p && p.files.length) parts.push('Reference documents for this project. Use them when relevant and cite the file name.\n' +
+    p.files.map((f) => `<document name="${f.name}">\n${f.text}\n</document>`).join('\n'));
+  if (chatSystem && chatSystem.trim()) parts.push(chatSystem.trim());
+  return parts.join('\n\n');
+}
+async function loadProjects() { state.projects = await api('/projects'); renderProjects(); }
+function renderProjects() {
+  const box = $('#projects'); box.innerHTML = '';
+  for (const p of state.projects) {
+    const d = document.createElement('div');
+    d.className = 'proj' + (p.id === state.project ? ' active' : '');
+    d.innerHTML = `<span>📁</span><span class="t">${esc(p.name)}</span><span class="n">${p.files.length ? p.files.length + ' file' + (p.files.length > 1 ? 's' : '') : ''}</span><button type="button" title="Edit project">⚙</button>`;
+    d.onclick = (e) => { if (e.target.closest('button')) openProjectDialog(p.id); else selectProject(p.id === state.project ? null : p.id); };
+    box.appendChild(d);
+  }
+  const cur = state.projects.find((p) => p.id === state.project);
+  $('#projChip').hidden = !cur;
+  if (cur) $('#projOpen').textContent = '📁 ' + cur.name;
+}
+async function setProject(id) {
+  // Set id and data together so a message can never go out with a project but without its knowledge.
+  const data = id ? await api('/projects/' + id).catch(() => null) : null;
+  state.projectData = data; state.project = data ? id : null;
+  renderProjects();
+}
+async function selectProject(id) {
+  await setProject(id); newChat(); refreshChats();
+}
+async function moveChat(c) {
+  const sel = $('#moveSel');
+  sel.innerHTML = '<option value="">No project</option>' + state.projects.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  sel.value = c.project || '';
+  $('#moveDlg').dataset.chat = c.id; $('#moveDlg').showModal();
+}
+$('#moveCancel').onclick = () => $('#moveDlg').close();
+$('#moveForm').onsubmit = async () => {
+  const id = $('#moveDlg').dataset.chat, project = $('#moveSel').value || null;
+  await api('/chats/' + id, { method: 'PUT', body: { project } });
+  if (state.chat.id === id) { state.chat.project = project; await setProject(project); }
+  toast(project ? 'Moved to project' : 'Removed from project');
+  refreshChats();
+};
+
+let editing = null; // project being edited in the dialog (full data)
+async function openProjectDialog(id) {
+  editing = await api('/projects/' + id);
+  $('#pName').value = editing.name; $('#pInstr').value = editing.instructions;
+  renderProjectFiles(); $('#projDlg').showModal();
+}
+function renderProjectFiles() {
+  const box = $('#pFiles'); box.innerHTML = '';
+  for (const f of editing.files) {
+    const d = document.createElement('div'); d.className = 'pfile';
+    d.innerHTML = `<span>📄</span><span class="nm">${esc(f.name)}</span><span class="meta">~${Math.round(f.text.length / 4).toLocaleString()} tok</span><button type="button" class="icon" title="Remove">✕</button>`;
+    d.querySelector('button').onclick = async () => {
+      await api(`/projects/${editing.id}/files/${f.id}`, { method: 'DELETE' });
+      editing.files = editing.files.filter((x) => x.id !== f.id); renderProjectFiles(); loadProjects();
+    };
+    box.appendChild(d);
+  }
+  const chars = knowledgeChars(editing), tok = Math.round(chars / 4);
+  $('#pTokens').textContent = editing.files.length ? `~${tok.toLocaleString()} tokens in every chat` : '';
+  const warn = $('#pWarn'), model = tok > 6000;
+  warn.hidden = !model;
+  warn.textContent = model ? 'Large knowledge base: the context window grows automatically (up to 32k), which uses more memory and slows replies. Consider trimming files.' : '';
+}
+$('#pAddFile').onclick = () => $('#pFileInput').click();
+$('#pFileInput').onchange = async (e) => {
+  const files = [...e.target.files]; e.target.value = '';
+  for (const f of files) {
+    try {
+      const a = await readFile(f);
+      if (a.kind !== 'text') { toast(`${f.name}: images can't be project knowledge`); continue; }
+      if (knowledgeChars(editing) + a.text.length > MAX_KNOWLEDGE_CHARS) { toast(`${f.name}: project knowledge limit reached`); continue; }
+      const meta = await api(`/projects/${editing.id}/files`, { method: 'POST', body: { name: a.name, text: a.text, size: a.size } });
+      editing.files.push({ ...meta, text: a.text }); renderProjectFiles();
+    } catch (err) { toast(`${f.name}: ${err.message || err}`); }
+  }
+  loadProjects();
+};
+$('#pCancel').onclick = () => $('#projDlg').close();
+$('#projForm').onsubmit = async () => {
+  await api('/projects/' + editing.id, { method: 'PUT', body: { name: $('#pName').value, instructions: $('#pInstr').value } });
+  await loadProjects();
+  if (state.project === editing.id) await setProject(editing.id);
+  toast('Project saved');
+};
+$('#pDelete').onclick = async () => {
+  if (!confirm(`Delete project "${editing.name}"? Its chats are kept and moved out of the project.`)) return;
+  await api('/projects/' + editing.id, { method: 'DELETE' });
+  $('#projDlg').close();
+  const wasActive = state.project === editing.id;
+  await loadProjects();
+  if (wasActive) await selectProject(null); else refreshChats();
+};
+$('#newProject').onclick = async () => {
+  const p = await api('/projects', { method: 'POST', body: { name: 'Untitled project' } });
+  await loadProjects(); openProjectDialog(p.id);
+};
+$('#projOpen').onclick = () => state.project && openProjectDialog(state.project);
+$('#projLeave').onclick = () => selectProject(null);
+
+
 // ---- attachments ---------------------------------------------------------
 const MAX_TEXT = 200000; // chars of text kept per attached file
 const isImage = (f) => /^image\/(png|jpe?g|webp|gif|bmp)$/.test(f.type);
@@ -269,10 +382,11 @@ function renderSidebar() {
     d.className = 'chat' + (state.chat && state.chat.id === c.id ? ' active' : '');
     d.innerHTML = `<span class="t">${esc(c.title)}</span><span class="acts">
       <button data-a="pin" title="Pin">${c.pinned ? '★' : '☆'}</button>
-      <button data-a="ren" title="Rename">✎</button><button data-a="del" title="Delete">✕</button></span>`;
+      <button data-a="mv" title="Move to project">📁</button><button data-a="ren" title="Rename">✎</button><button data-a="del" title="Delete">✕</button></span>`;
     d.onclick = async (e) => {
       const a = e.target.dataset.a;
       if (a === 'pin') { await api('/chats/' + c.id, { method: 'PUT', body: { pinned: !c.pinned } }); return refreshChats(); }
+      if (a === 'mv') return moveChat(c);
       if (a === 'ren') { const t = prompt('Rename chat', c.title); if (t) { await api('/chats/' + c.id, { method: 'PUT', body: { title: t } }); refreshChats(); } return; }
       if (a === 'del') {
         if (!confirm('Delete this chat?')) return;
@@ -287,26 +401,31 @@ function renderSidebar() {
 }
 async function refreshChats() {
   const q = $('#search').value.trim();
-  state.chats = await api('/chats' + (q ? '?q=' + encodeURIComponent(q) : ''));
+  // Searching spans every project; otherwise show only the active project's chats (or unfiled ones).
+  const qs = q ? '?q=' + encodeURIComponent(q) : '?project=' + (state.project || 'none');
+  state.chats = await api('/chats' + qs);
   renderSidebar();
 }
 
 // ---- chat lifecycle ------------------------------------------------------
-function settings() {
-  const o = { temperature: +$('#temperature').value, top_p: +$('#topP').value, num_ctx: +$('#numCtx').value || 4096 };
+// Ollama silently drops the *start* of an over-long prompt (our system prompt!), so grow num_ctx to fit.
+function settings(promptChars = 0) {
+  const need = Math.ceil((promptChars / 3.5 + 1024) / 1024) * 1024;
+  const o = { temperature: +$('#temperature').value, top_p: +$('#topP').value, num_ctx: Math.min(Math.max(+$('#numCtx').value || 4096, need), 32768) };
   if ($('#numPredict').value) o.num_predict = +$('#numPredict').value;
   return o;
 }
 function newChat() {
   if (state.streaming) state.streaming.abort();
   closeArtifact();
-  state.chat = { id: null, title: 'New Chat', model: $('#modelSelect').value, system: $('#systemPrompt').value, messages: [] };
+  state.chat = { id: null, title: 'New Chat', model: $('#modelSelect').value, system: $('#systemPrompt').value, project: state.project, messages: [] };
   renderAll(); renderSidebar(); $('#input').focus();
 }
 async function openChat(id) {
   if (state.streaming) state.streaming.abort();
   closeArtifact();
   state.chat = await api('/chats/' + id);
+  if ((state.chat.project || null) !== state.project) { await setProject(state.chat.project || null); refreshChats(); }
   if (state.chat.model) $('#modelSelect').value = state.chat.model;
   $('#systemPrompt').value = state.chat.system || '';
   renderAll(); renderSidebar();
@@ -317,7 +436,7 @@ async function persist() {
   if (!c.id) {
     const first = c.messages.find((m) => m.role === 'user');
     c.title = first ? (first.content || (first.attachments && first.attachments[0].name) || 'New Chat').replace(/\s+/g, ' ').slice(0, 48) : 'New Chat';
-    const made = await api('/chats', { method: 'POST', body: { title: c.title, model: c.model, system: c.system, messages: c.messages } });
+    const made = await api('/chats', { method: 'POST', body: { title: c.title, model: c.model, system: c.system, project: c.project, messages: c.messages } });
     c.id = made.id;
   } else {
     await api('/chats/' + c.id, { method: 'PUT', body: { messages: c.messages, model: c.model, system: c.system } });
@@ -338,14 +457,16 @@ async function generate() {
   c.messages.push(reply);
   renderAll();
   const el = $('#messages').lastElementChild;
+  const system = fullSystem(c.system);
+  const wire = c.messages.slice(0, -1).map(toOllama);
   const ac = state.streaming = new AbortController();
   setBusy(true);
   const t0 = performance.now(); let tokens = 0;
   try {
     const r = await fetch('/api/chat', {
       method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: c.model, system: c.system, options: settings(),
-        messages: c.messages.slice(0, -1).map(toOllama) }),
+      body: JSON.stringify({ model: c.model, system, options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
+        messages: wire }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const reader = r.body.getReader(), dec = new TextDecoder();
@@ -469,6 +590,7 @@ state.ready = (async function init() {
     sel.innerHTML = '<option value="">Ollama unreachable</option>';
     $('#status').textContent = 'Cannot reach Ollama — start it with: ollama serve';
   }
+  await loadProjects();
   newChat();
   refreshChats();
 })();
