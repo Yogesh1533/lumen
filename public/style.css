@@ -125,3 +125,23 @@ body.chatting #welcome { display: none; }
 .att img { width: 120px; height: 120px; border-radius: 10px; cursor: zoom-in; }
 .att.file { display: flex; align-items: center; gap: 8px; background: var(--panel2); border-radius: 10px; padding: 6px 10px; font-size: 12px; }
 .box.drag { outline: 2px dashed var(--accent); outline-offset: 3px; }
+
+/* artifacts */
+#artifact { width: 46%; min-width: 380px; flex: none; padding: 0; gap: 0; border-right: 0; border-left: 1px solid var(--border); background: var(--bg); }
+#artifact[hidden] { display: none; }
+.art-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.art-title { flex: 1; min-width: 120px; overflow: hidden; display: flex; flex-direction: column; line-height: 1.25; }
+.art-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#artMeta { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.art-tabs { display: flex; background: var(--panel2); border-radius: 8px; padding: 2px; }
+.art-tabs button { padding: 3px 12px; font-size: 13px; border-radius: 6px; color: var(--muted); }
+.art-tabs button.on { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px #0002; }
+.art-nav { display: flex; align-items: center; font-size: 12px; color: var(--muted); }
+.art-nav[hidden] { display: none; }
+#artFrame { flex: 1; width: 100%; border: 0; background: #fff; }
+#artFrame[hidden] { display: none; }
+#artCode { flex: 1; margin: 0; padding: 14px; overflow: auto; background: var(--code); color: var(--code-fg); font: 13px/1.5 ui-monospace, Menlo, monospace; white-space: pre; }
+.content pre .bar .right { display: flex; gap: 4px; }
+.content pre .bar button[data-open-art] { color: #fff; background: var(--accent); border-radius: 6px; }
+#controls label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+@media (max-width: 760px) { #artifact { position: fixed; z-index: 6; inset: 0; width: 100%; min-width: 0; } }

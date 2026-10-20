@@ -56,7 +56,8 @@ function markdown(src) {
       const buf = []; i++;
       while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
       i++;
-      out.push(`<pre><div class="bar"><span>${esc(fence[1] || 'code')}</span><button type="button" data-copy>Copy</button></div><code>${esc(buf.join('\n'))}</code></pre>`);
+      const art = ART_LANGS[(fence[1] || '').toLowerCase()];
+      out.push(`<pre${art ? ' data-art' : ''}><div class="bar"><span>${esc(fence[1] || 'code')}</span><span class="right">${art ? '<button type="button" data-open-art>Open as artifact</button>' : ''}<button type="button" data-copy>Copy</button></span></div><code>${esc(buf.join('\n'))}</code></pre>`);
       continue;
     }
     const h = line.match(/^(#{1,6})\s+(.*)/);
@@ -87,6 +88,74 @@ function markdown(src) {
   }
   return out.join('');
 }
+
+
+// ---- artifacts -----------------------------------------------------------
+const ART_LANGS = { html: 'html', svg: 'svg', markdown: 'md', md: 'md' };
+const ART_EXT = { html: 'html', svg: 'svg', md: 'md' };
+state.art = { list: [], i: 0, tab: 'preview' };
+
+// All artifact-capable fenced blocks across the chat, in order.
+function collectArtifacts() {
+  const list = [];
+  state.chat.messages.forEach((m, mi) => {
+    if (m.role !== 'assistant') return;
+    const re = /```(html|svg|markdown|md)[^\n]*\n([\s\S]*?)(?:```|$)/gi;
+    let x, n = 0;
+    while ((x = re.exec(m.content || ''))) list.push({ mi, n: n++, lang: ART_LANGS[x[1].toLowerCase()], code: x[2].replace(/\n$/, '') });
+  });
+  return list;
+}
+function artTitle(a) {
+  const t = a.lang === 'html' ? (a.code.match(/<title[^>]*>([^<]+)<\/title>/i) || a.code.match(/<h1[^>]*>([^<]+)<\/h1>/i) || [])[1]
+    : a.lang === 'md' ? (a.code.match(/^#{1,3}\s+(.+)$/m) || [])[1] : null;
+  return (t || { html: 'HTML page', svg: 'SVG image', md: 'Document' }[a.lang]).trim().slice(0, 80);
+}
+function artDoc(a) {
+  if (a.lang === 'html') return a.code;
+  if (a.lang === 'svg') return `<!doctype html><meta charset="utf-8"><body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#fff">${a.code}</body>`;
+  return `<!doctype html><meta charset="utf-8"><style>body{font:16px/1.6 -apple-system,Segoe UI,sans-serif;max-width:720px;margin:32px auto;padding:0 20px;color:#1b1b24}pre{background:#14141c;color:#eee;padding:12px;border-radius:8px;overflow:auto}code{background:#eee;padding:1px 5px;border-radius:4px}pre code{background:none;padding:0}th,td{border:1px solid #ddd;padding:4px 10px}table{border-collapse:collapse}blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:12px;color:#666}</style>${markdown(a.code).replace(/<button[^>]*data-copy[^>]*>Copy<\/button>/g, '')}`;
+}
+function renderArtifact() {
+  const { list, i, tab } = state.art, a = list[i];
+  if (!a) return closeArtifact();
+  $('#artifact').hidden = false; $('#controls').hidden = true;
+  $('#artTitle').textContent = artTitle(a);
+  $('#artMeta').textContent = a.lang === 'md' ? 'markdown' : a.lang;
+  $('.art-nav').hidden = list.length < 2;
+  $('#artPos').textContent = `${i + 1} / ${list.length}`;
+  $('#artPrev').disabled = i === 0; $('#artNext').disabled = i === list.length - 1;
+  $('#tabPreview').classList.toggle('on', tab === 'preview'); $('#tabCode').classList.toggle('on', tab === 'code');
+  $('#artFrame').hidden = tab !== 'preview'; $('#artCode').hidden = tab !== 'code';
+  if (tab === 'preview') $('#artFrame').srcdoc = artDoc(a); else $('#artCode').textContent = a.code;
+}
+function openArtifact(mi, n, tab = 'preview') {
+  state.art.list = collectArtifacts();
+  const i = state.art.list.findIndex((a) => a.mi === mi && a.n === n);
+  if (i < 0) return;
+  state.art.i = i; state.art.tab = tab; renderArtifact();
+}
+function closeArtifact() { $('#artifact').hidden = true; $('#artFrame').srcdoc = ''; }
+// After a reply finishes, surface its most substantial html/svg block automatically.
+function maybeAutoOpenArtifact() {
+  if (!$('#autoArt').checked) return;
+  const mi = state.chat.messages.length - 1;
+  const mine = collectArtifacts().filter((a) => a.mi === mi && a.lang !== 'md' && a.code.split('\n').length >= 8);
+  if (mine.length) openArtifact(mi, mine[mine.length - 1].n);
+}
+$('#artClose').onclick = closeArtifact;
+$('#artPrev').onclick = () => { state.art.i--; renderArtifact(); };
+$('#artNext').onclick = () => { state.art.i++; renderArtifact(); };
+$('#tabPreview').onclick = () => { state.art.tab = 'preview'; renderArtifact(); };
+$('#tabCode').onclick = () => { state.art.tab = 'code'; renderArtifact(); };
+$('#artCopy').onclick = async () => { await navigator.clipboard.writeText(state.art.list[state.art.i].code); toast('Copied'); };
+$('#artDownload').onclick = () => {
+  const a = state.art.list[state.art.i];
+  const url = URL.createObjectURL(new Blob([a.code], { type: 'text/plain' }));
+  const l = document.createElement('a'); l.href = url; l.download = `${artTitle(a).replace(/[^\w-]+/g, '-').toLowerCase()}.${ART_EXT[a.lang]}`;
+  l.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#artifact').hidden) closeArtifact(); });
 
 
 // ---- attachments ---------------------------------------------------------
@@ -230,11 +299,13 @@ function settings() {
 }
 function newChat() {
   if (state.streaming) state.streaming.abort();
+  closeArtifact();
   state.chat = { id: null, title: 'New Chat', model: $('#modelSelect').value, system: $('#systemPrompt').value, messages: [] };
   renderAll(); renderSidebar(); $('#input').focus();
 }
 async function openChat(id) {
   if (state.streaming) state.streaming.abort();
+  closeArtifact();
   state.chat = await api('/chats/' + id);
   if (state.chat.model) $('#modelSelect').value = state.chat.model;
   $('#systemPrompt').value = state.chat.system || '';
@@ -305,6 +376,7 @@ async function generate() {
   if (!reply.content && !reply.error && !reply.thinking) c.messages.pop();
   paint(el, reply, false);
   renderAll();
+  if (!reply.error) maybeAutoOpenArtifact();
   if (tokens) $('#status').textContent = `${tokens} chunks in ${((performance.now() - t0) / 1000).toFixed(1)}s`;
   persist().catch((e) => toast('Save failed: ' + e.message));
 }
@@ -358,6 +430,8 @@ const toggleSide = () => $('#sidebar').classList.toggle('closed');
 $('#toggleSide').onclick = toggleSide; $('#openSide').onclick = toggleSide;
 $('#exportBtn').onclick = () => { location.href = '/api/chats/export'; };
 $('#clearBtn').onclick = async () => { if (confirm('Delete ALL chats? This cannot be undone.')) { await api('/chats', { method: 'DELETE' }); newChat(); refreshChats(); } };
+$('#autoArt').checked = pref('autoArt') !== '0';
+$('#autoArt').onchange = (e) => pref('autoArt', e.target.checked ? '1' : '0');
 $('#themeBtn').onclick = () => {
   const d = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   document.documentElement.dataset.theme = d; pref('theme', d);
@@ -366,6 +440,11 @@ $('#themeBtn').onclick = () => {
 $('#messages').addEventListener('click', async (e) => {
   const copy = e.target.closest('[data-copy]');
   if (copy) { await navigator.clipboard.writeText(copy.closest('pre').querySelector('code').textContent); copy.textContent = 'Copied'; setTimeout(() => (copy.textContent = 'Copy'), 1200); return; }
+  const open = e.target.closest('[data-open-art]');
+  if (open) {
+    const pre = open.closest('pre'), msg = pre.closest('.msg');
+    return openArtifact(+msg.dataset.idx, [...msg.querySelectorAll('pre[data-art]')].indexOf(pre));
+  }
   const btn = e.target.closest('[data-act]'); if (!btn || state.streaming) return;
   const idx = +btn.closest('.msg').dataset.idx, m = state.chat.messages[idx], act = btn.dataset.act;
   if (act === 'copy') { await navigator.clipboard.writeText(m.content); toast('Copied'); }
