@@ -3,6 +3,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { McpManager } = require('./mcp');
+const mcp = new McpManager();
 
 const PORT = process.env.PORT || 3100;
 const OLLAMA = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
@@ -21,7 +23,7 @@ const PROJ_FILE = path.join(path.dirname(DATA_FILE), 'projects.json');
 let projects = {};
 try { projects = JSON.parse(fs.readFileSync(PROJ_FILE, 'utf8')); } catch { projects = {}; }
 const SETTINGS_FILE = path.join(path.dirname(DATA_FILE), 'settings.json');
-let settings = { memoryEnabled: true, memories: [], styles: [] };
+let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [] };
 try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch { /* first run */ }
 const timers = new Map();
 function write(file, obj) {
@@ -63,6 +65,23 @@ function readBody(req) {
     req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
     req.on('error', reject);
   });
+}
+
+// Lumen can launch programs (MCP servers), so the API must only answer the Lumen page itself.
+// Without this, any website open in your browser could POST to localhost and run commands.
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+function guard(req, res, isApi) {
+  const host = String(req.headers.host || '');
+  if (!LOCAL_HOSTS.has(host.replace(/:\d+$/, '').toLowerCase())) { send(res, 403, { error: 'Forbidden host' }); return false; } // DNS rebinding
+  if (!isApi) return true;
+  const origin = req.headers.origin;
+  if (origin && (() => { try { return new URL(origin).host !== host; } catch { return true; } })()) { send(res, 403, { error: 'Cross-origin request blocked' }); return false; }
+  if (req.headers['sec-fetch-site'] === 'cross-site') { send(res, 403, { error: 'Cross-site request blocked' }); return false; }
+  const hasBody = req.method === 'POST' || req.method === 'PUT';
+  if (hasBody && Number(req.headers['content-length'] || 0) > 0 && !/^application\/json\b/i.test(req.headers['content-type'] || '')) {
+    send(res, 415, { error: 'Content-Type must be application/json' }); return false; // blocks "simple" cross-site form posts
+  }
+  return true;
 }
 
 // ---- routes --------------------------------------------------------------
@@ -124,7 +143,8 @@ async function api(req, res, url) {
       const r = await fetch(`${OLLAMA}/api/chat`, {
         method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: body.model, messages, stream: true, options: body.options || {},
-          ...(typeof body.think === 'boolean' ? { think: body.think } : {}) }),
+          ...(typeof body.think === 'boolean' ? { think: body.think } : {}),
+          ...(Array.isArray(body.tools) && body.tools.length ? { tools: body.tools } : {}) }),
       });
       if (!r.ok) return send(res, r.status, { error: (await r.text()).slice(0, 500) });
       res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
@@ -136,6 +156,60 @@ async function api(req, res, url) {
       else res.end();
     }
     return;
+  }
+
+  // ---- MCP servers ----------------------------------------------------------
+  if (parts[0] === 'mcp') {
+    const view = (c) => ({ ...c, ...mcp.info(c.id) });
+    const cleanCfg = (b, base = {}) => {
+      const cfg = { ...base };
+      if (b.name !== undefined) cfg.name = String(b.name).trim().slice(0, 40);
+      if (b.transport !== undefined) cfg.transport = b.transport === 'http' ? 'http' : 'stdio';
+      if (b.command !== undefined) cfg.command = String(b.command).trim().slice(0, 1000);
+      if (b.url !== undefined) cfg.url = String(b.url).trim().slice(0, 500);
+      if (b.enabled !== undefined) cfg.enabled = !!b.enabled;
+      if (b.env !== undefined) {
+        const env = {};
+        for (const [k, v] of Object.entries(b.env || {}).slice(0, 20)) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) env[k] = String(v).slice(0, 2000);
+        cfg.env = env;
+      }
+      if (!cfg.name) throw new Error('Name is required');
+      if (cfg.transport === 'http') { if (!/^https?:\/\//i.test(cfg.url || '')) throw new Error('A http(s) URL is required'); }
+      else if (!cfg.command) throw new Error('A command is required');
+      return cfg;
+    };
+    const id = parts[1];
+    if (!id && m === 'GET') return send(res, 200, settings.mcpServers.map(view));
+    if (!id && m === 'POST') {
+      if (settings.mcpServers.length >= 20) return send(res, 400, { error: 'Too many servers' });
+      let cfg;
+      try { cfg = { id: crypto.randomUUID(), transport: 'stdio', enabled: true, env: {}, ...cleanCfg(await readBody(req)) }; } catch (e) { return send(res, 400, { error: e.message }); }
+      settings.mcpServers.push(cfg); saveSettings();
+      if (cfg.enabled) await mcp.connect(cfg);
+      return send(res, 200, view(cfg));
+    }
+    if (parts[0] === 'mcp' && id === 'call' && m === 'POST') {
+      const b = await readBody(req);
+      if (!settings.mcpServers.some((c) => c.id === b.server && c.enabled)) return send(res, 404, { error: 'Unknown or disabled server' });
+      try { return send(res, 200, await mcp.call(b.server, String(b.tool), b.arguments)); }
+      catch (e) { return send(res, 200, { isError: true, text: 'Tool call failed: ' + String(e.message || e).slice(0, 500) }); }
+    }
+    const idx = settings.mcpServers.findIndex((c) => c.id === id);
+    if (idx < 0) return send(res, 404, { error: 'not found' });
+    const cur = settings.mcpServers[idx];
+    if (parts[2] === 'reconnect' && m === 'POST') { await mcp.connect(cur); return send(res, 200, view(cur)); }
+    if (m === 'PUT') {
+      let next;
+      try { next = cleanCfg(await readBody(req), cur); } catch (e) { return send(res, 400, { error: e.message }); }
+      settings.mcpServers[idx] = next; saveSettings();
+      if (next.enabled) await mcp.connect(next); else await mcp.disconnect(next.id);
+      return send(res, 200, view(next));
+    }
+    if (m === 'DELETE') {
+      await mcp.disconnect(id);
+      settings.mcpServers.splice(idx, 1); saveSettings();
+      return send(res, 200, { ok: true });
+    }
   }
 
   if (parts[0] === 'settings') {
@@ -257,7 +331,9 @@ async function api(req, res, url) {
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
-    if (url.pathname.startsWith('/api/')) return await api(req, res, url);
+    const isApi = url.pathname.startsWith('/api/');
+    if (!guard(req, res, isApi)) return;
+    if (isApi) return await api(req, res, url);
     let p = path.normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '');
     if (p === '/' || p === '\\' || !path.extname(p)) p = '/index.html'; // SPA fallback
     const file = path.join(PUBLIC, p);
@@ -270,4 +346,8 @@ http.createServer(async (req, res) => {
   } catch (e) {
     if (!res.headersSent) send(res, 500, { error: String(e.message || e) });
   }
-}).listen(PORT, '127.0.0.1', () => console.log(`Lumen running at http://localhost:${PORT} (Ollama: ${OLLAMA})`));
+}).listen(PORT, '127.0.0.1', () => {
+  console.log(`Lumen running at http://localhost:${PORT} (Ollama: ${OLLAMA})`);
+  for (const cfg of settings.mcpServers) if (cfg.enabled) mcp.connect(cfg).then((i) => console.log(`MCP ${cfg.name}: ${i.status}${i.error ? ' — ' + i.error : ` (${i.tools.length} tools)`}`));
+});
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => mcp.closeAll().finally(() => process.exit(0)));

@@ -214,3 +214,41 @@ details.think.live summary::after { content: ""; display: inline-block; width: 6
 .stform { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 #settingsDlg input:not([type=checkbox]) { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%; }
 .linkbtn { color: var(--danger); padding: 0 4px; font-size: 12px; text-decoration: underline; }
+
+/* tools + MCP */
+#toolsDlg { max-height: calc(100vh - 48px); overflow-y: auto; }
+#toolsDlg h3 { margin: 18px 0 8px; font-size: 14px; }
+#toolsDlg label.check { flex-direction: row; align-items: center; gap: 8px; }
+#toolsDlg input:not([type=checkbox]):not([type=radio]) { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%; }
+#toolsDlg input[hidden] { display: none; }
+.seg { display: flex; gap: 16px; font-size: 13px; }
+.seg label { flex-direction: row; align-items: center; gap: 6px; margin: 0; color: var(--text); }
+#mcpList { display: flex; flex-direction: column; gap: 8px; }
+#mcpList:empty::after { content: "No servers yet. Add one below to give the model tools."; font-size: 12px; color: var(--muted); }
+.mcp { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+.mcp .mh { display: flex; align-items: center; gap: 8px; }
+.mcp .nm { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.connected { background: #2eb872; } .dot.error { background: var(--danger); } .dot.connecting { background: #e0a020; }
+.mcp .err { color: var(--danger); font-size: 12px; margin-top: 4px; }
+.mcp details { margin-top: 6px; color: var(--muted); }
+.mcp details div { padding: 2px 0; } .mcp details b { color: var(--text); }
+.mcp .meta { font-size: 12px; color: var(--muted); }
+.allow { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 2px 0; }
+.allow code { flex: 1; }
+.toolcall { border: 1px solid var(--border); border-radius: 10px; margin: 0 0 10px; background: var(--panel); font-size: 13px; overflow: hidden; }
+.toolcall .th { display: flex; align-items: center; gap: 8px; padding: 7px 12px; }
+.toolcall .th b { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolcall .ts { font-size: 12px; color: var(--muted); }
+.toolcall.awaiting { border-color: var(--accent); }
+.toolcall.running .ts::before { content: "● "; color: var(--accent); animation: blink 1s steps(2) infinite; }
+.toolcall.error .ts, .toolcall.denied .ts { color: var(--danger); }
+.toolcall.done .ts { color: #2eb872; }
+.toolcall details { padding: 0 12px 8px; color: var(--muted); }
+.toolcall details summary { cursor: pointer; }
+.toolcall pre { margin: 6px 0 0; padding: 8px 10px; background: var(--code); color: var(--code-fg); border-radius: 8px; overflow: auto; max-height: 200px; font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+.toolcall .appr { display: flex; gap: 8px; padding: 0 12px 10px; }
+.toolcall .appr button { padding: 5px 12px; font-size: 13px; border: 1px solid var(--border); background: var(--bg); }
+.toolcall .appr button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.toolcall .appr button.deny { color: var(--danger); }
+#toolsBtn.on::after { content: attr(data-n); margin-left: 6px; background: var(--accent); color: var(--accent-fg); border-radius: 999px; padding: 0 6px; font-size: 11px; }

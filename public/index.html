@@ -36,6 +36,7 @@
       <div class="spacer"></div>
       <label class="toggle" id="thinkWrap" title="Let reasoning models think before answering"><input type="checkbox" id="thinkToggle" checked> Thinking</label>
       <label class="toggle" title="Temporary chats are not saved"><input type="checkbox" id="tempToggle"> Temporary</label>
+      <button id="toolsBtn" class="ghost" title="Tools &amp; MCP servers">🔧 Tools</button>
       <button id="controlsBtn" class="ghost">Controls</button>
     </header>
 
@@ -130,6 +131,26 @@
       <div class="addrow"><span class="spacer"></span><button type="button" id="stCancel" class="ghost" hidden>Cancel edit</button><button type="button" id="stSave" class="ghost">Add style</button></div>
     </div>
     <div class="dlg-actions"><span class="spacer"></span><button type="button" id="setClose" class="primary">Done</button></div>
+  </div>
+</dialog>
+<dialog id="toolsDlg">
+  <div>
+    <h2>Tools &amp; MCP servers</h2>
+    <label class="check"><input type="checkbox" id="toolsOn"> Let the model use tools in chats <span class="sub">(the model must support tools; you approve each call)</span></label>
+    <div id="mcpList"></div>
+    <h3>Add a server</h3>
+    <div class="warn">MCP servers are programs that run on this computer with your permissions. Only add servers you trust.</div>
+    <div class="stform">
+      <div class="seg"><label><input type="radio" name="mcT" value="stdio" checked> Local command</label><label><input type="radio" name="mcT" value="http"> Remote URL</label></div>
+      <input id="mcName" maxlength="40" placeholder="Name, e.g. Filesystem">
+      <input id="mcCmd" placeholder="Command, e.g. npx -y @modelcontextprotocol/server-filesystem /Users/you/Documents">
+      <input id="mcUrl" placeholder="https://example.com/mcp" hidden>
+      <textarea id="mcEnv" rows="2" placeholder="Environment variables, one per line: KEY=value" ></textarea>
+      <div class="addrow"><span id="mcMsg" class="sub"></span><span class="spacer"></span><button type="button" id="mcAdd" class="ghost">Add server</button></div>
+    </div>
+    <h3>Auto-approved tools</h3>
+    <div id="allowList"></div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="toolsClose" class="primary">Done</button></div>
   </div>
 </dialog>
 <dialog id="moveDlg">
