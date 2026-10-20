@@ -53,6 +53,22 @@
     </form>
   </main>
 
+  <aside id="artifact" hidden>
+    <div class="art-head">
+      <div class="art-title"><strong id="artTitle">Artifact</strong><span id="artMeta"></span></div>
+      <div class="art-tabs" role="tablist">
+        <button type="button" id="tabPreview" class="on" role="tab">Preview</button>
+        <button type="button" id="tabCode" role="tab">Code</button>
+      </div>
+      <div class="art-nav"><button type="button" id="artPrev" class="icon" title="Previous version">‹</button><span id="artPos"></span><button type="button" id="artNext" class="icon" title="Next version">›</button></div>
+      <button type="button" id="artCopy" class="ghost">Copy</button>
+      <button type="button" id="artDownload" class="ghost">Download</button>
+      <button type="button" id="artClose" class="icon" title="Close">✕</button>
+    </div>
+    <iframe id="artFrame" title="Artifact preview" sandbox="allow-scripts allow-forms"></iframe>
+    <pre id="artCode" hidden></pre>
+  </aside>
+
   <aside id="controls" hidden>
     <div class="side-top"><strong>Controls</strong><button id="closeControls" class="icon">✕</button></div>
     <label>System prompt
@@ -64,6 +80,7 @@
     <label>Top P <output id="topPOut">0.9</output>
       <input id="topP" type="range" min="0" max="1" step="0.05" value="0.9">
     </label>
+    <label class="check"><input type="checkbox" id="autoArt" checked> Auto-open artifacts</label>
     <label>Context length
       <input id="numCtx" type="number" min="512" step="512" value="4096">
     </label>
