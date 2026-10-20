@@ -195,3 +195,22 @@ details.think.live summary::after { content: ""; display: inline-block; width: 6
 .editbox { width: 100%; min-height: 80px; resize: vertical; }
 .editbar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
 .editbar button { padding: 6px 14px; font-size: 13px; }
+
+/* settings: memory + styles */
+#styleSelect { max-width: 170px; font-weight: 500; font-size: 13px; color: var(--muted); }
+#settingsDlg h3 { margin: 18px 0 8px; font-size: 14px; }
+#settingsDlg h3:first-of-type { margin-top: 4px; }
+#settingsDlg label.check { flex-direction: row; align-items: center; gap: 8px; }
+#settingsDlg { max-height: calc(100vh - 48px); overflow-y: auto; }
+#memList, #styleList { display: flex; flex-direction: column; gap: 6px; max-height: 190px; overflow-y: auto; }
+#memList:empty::after { content: "Nothing remembered yet."; font-size: 12px; color: var(--muted); }
+#styleList:empty::after { content: "No custom styles yet."; font-size: 12px; color: var(--muted); }
+.memrow, .strow { display: flex; align-items: center; gap: 8px; }
+.memrow input { flex: 1; }
+.strow { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+.strow .nm { font-weight: 600; } .strow .pv { flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.addrow { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.addrow input { flex: 1; }
+.stform { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+#settingsDlg input:not([type=checkbox]) { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%; }
+.linkbtn { color: var(--danger); padding: 0 4px; font-size: 12px; text-decoration: underline; }

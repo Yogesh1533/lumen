@@ -22,6 +22,7 @@
     <div class="side-bottom">
       <button id="exportBtn" class="ghost">Export</button>
       <button id="clearBtn" class="ghost danger">Clear all</button>
+      <button id="settingsBtn" class="icon" title="Memory &amp; custom styles">🧠</button>
       <button id="themeBtn" class="icon" title="Toggle theme">◐</button>
     </div>
   </aside>
@@ -31,6 +32,7 @@
       <button id="openSide" class="icon" title="Open sidebar">☰</button>
       <span id="projChip" class="pchip" hidden><button type="button" id="projOpen"></button><button type="button" id="projLeave" title="Leave project">✕</button></span>
       <select id="modelSelect" aria-label="Model"></select>
+      <select id="styleSelect" aria-label="Response style" title="Response style"></select>
       <div class="spacer"></div>
       <label class="toggle" id="thinkWrap" title="Let reasoning models think before answering"><input type="checkbox" id="thinkToggle" checked> Thinking</label>
       <label class="toggle" title="Temporary chats are not saved"><input type="checkbox" id="tempToggle"> Temporary</label>
@@ -111,6 +113,24 @@
       <button type="submit" class="primary">Save</button>
     </div>
   </form>
+</dialog>
+<dialog id="settingsDlg">
+  <div id="settingsForm">
+    <h2>Memory &amp; styles</h2>
+    <h3>Memory</h3>
+    <label class="check"><input type="checkbox" id="memEnabled"> Use memory in chats <span class="sub">(never used in Temporary chats)</span></label>
+    <div id="memList"></div>
+    <div class="addrow"><input id="memInput" maxlength="500" placeholder="Something to remember, e.g. I prefer TypeScript over JavaScript"><button type="button" id="memAdd" class="ghost">Add</button></div>
+    <p class="sub">Tip: type “Remember that …” in any chat to save a fact. <button type="button" id="memClear" class="linkbtn">Clear all</button></p>
+    <h3>Custom styles</h3>
+    <div id="styleList"></div>
+    <div class="stform">
+      <input id="stName" maxlength="40" placeholder="Style name, e.g. Pirate">
+      <textarea id="stPrompt" rows="3" maxlength="2000" placeholder="How should replies sound? e.g. Talk like a pirate and keep it short."></textarea>
+      <div class="addrow"><span class="spacer"></span><button type="button" id="stCancel" class="ghost" hidden>Cancel edit</button><button type="button" id="stSave" class="ghost">Add style</button></div>
+    </div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="setClose" class="primary">Done</button></div>
+  </div>
 </dialog>
 <dialog id="moveDlg">
   <form method="dialog" id="moveForm">
