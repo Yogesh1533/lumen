@@ -38,8 +38,10 @@ if (!settings.toolToggles || typeof settings.toolToggles !== 'object') settings.
 if (!settings.extensions || typeof settings.extensions !== 'object') settings.extensions = {};
 if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
 // The starter skills are copied into the data folder on the first run. A skill that the
-// user has edited is never overwritten.
-skills.ensureStarters(SKILLS_DIR);
+// user has edited is never overwritten, and a skill that the user deleted stays deleted.
+skills.ensureStarters(SKILLS_DIR, settings);
+// The folders of the uploads that a crash left behind are swept away.
+skills.sweepStaging(SKILLS_DIR);
 const timers = new Map();
 // A small ring buffer of the server's own log lines, shown in Settings > Troubleshooting.
 const LOG_MAX = 300;
@@ -163,12 +165,12 @@ const sameServer = (c, s) => (c.transport || 'stdio') === (s.transport || 'stdio
 
 const publicSettings = () => ({ ...settings, mcpServers: settings.mcpServers.map(viewCfg), extensions: undefined, web: { ...settings.web, braveKey: '', hasBraveKey: !!settings.web.braveKey } });
 // The built-in servers are virtual MCP servers: they have no process, they only run
-// inside Lumen. The web tools appear when they are switched on, the skills server is
-// always there (a skill is a folder on this computer).
+// inside Lumen. The web tools appear when they are switched on, the skills server
+// appears when at least one skill is switched on (a skill is a folder on this computer).
 const builtinServers = () => {
   const out = [];
   if (settings.web.enabled) out.push({ id: 'builtin', name: 'Web', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: webtools.tools(settings.web) });
-  out.push({ id: 'skills', name: 'Skills', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: skills.tools() });
+  if (skills.anyEnabled(SKILLS_DIR, settings)) out.push({ id: 'skills', name: 'Skills', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: skills.tools() });
   return out;
 };
 const projectSummary = ({ files, ...p }) => ({ ...p, files: files.map(({ text, ...f }) => ({ ...f, chars: text.length })) });

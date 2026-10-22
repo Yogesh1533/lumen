@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 const { zip } = require('./lib/zipwrite');
 
 const TMP = process.env.LUMEN_TEST_TMP || path.join(os.tmpdir(), 'lumen-tests');
@@ -40,6 +41,54 @@ async function call(method, url, body, headers = {}) {
   try { json = JSON.parse(text); } catch { /* not json */ }
   return { status: r.status, json, text };
 }
+// A second Lumen with the same data folder: this is the code path of a restart.
+async function startServer(port) {
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+    env: { ...process.env, PORT: String(port), LUMEN_DATA: DATA_FILE },
+    stdio: 'ignore',
+  });
+  const url = 'http://127.0.0.1:' + port;
+  let okUp = false;
+  for (let i = 0; i < 100; i++) {
+    try { const r = await fetch(url + '/api/config'); if (r.ok) { okUp = true; break; } } catch { /* not up yet */ }
+    await sleep(100);
+  }
+  const call2 = async (method, u, body) => {
+    const r = await fetch(url + u, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: body === undefined || method === 'GET' ? undefined : JSON.stringify(body),
+    });
+    const text = await r.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* not json */ }
+    return { status: r.status, json, text };
+  };
+  return {
+    ok: okUp, url, call: call2,
+    stop: () => { try { child.kill('SIGTERM'); } catch { /* already gone */ } },
+  };
+}
+// A snapshot of a folder: every file with its size, its mtime and its content. It is
+// used to prove that a tool only reads.
+function snapshotDir(dir) {
+  const out = {};
+  const walk = (d, rel) => {
+    let names = [];
+    try { names = fs.readdirSync(d); } catch { return; }
+    for (const n of names.sort()) {
+      const p = path.join(d, n);
+      let st;
+      try { st = fs.lstatSync(p); } catch { continue; }
+      const r = rel ? rel + '/' + n : n;
+      if (st.isSymbolicLink()) { out[r] = { link: fs.readlinkSync(p) }; continue; }
+      if (st.isDirectory()) { walk(p, r); continue; }
+      out[r] = { size: st.size, mtime: st.mtimeMs, hash: crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') };
+    }
+  };
+  walk(dir, '');
+  return JSON.stringify(out);
+}
 // The skills of the server. A route that does not exist must not crash the test: the
 // assertion fails, the test keeps going.
 const skillByName = async (name) => (((await call('GET', '/api/skills')).json) || {}).skills?.find((s) => s.name === name);
@@ -65,7 +114,7 @@ const MODEL_SYS = [
 
 (async () => {
   const h = await launch(BASE, 9348);
-  const { ev, ok, waitFor, shot } = h;
+  const { ev, ok, waitFor, shot, setFiles } = h;
   // A page that throws answers with a truthy "EXC ..." string, so a boolean check has to
   // be compared with true — otherwise it would pass without checking anything.
   const t = async (expr) => (await ev(expr)) === true;
@@ -134,12 +183,15 @@ const MODEL_SYS = [
   ok('a skills tool that is on again is sent again', /skills__use_skill/.test(toolNames3), toolNames3);
 
   // ---- 4. use_skill ------------------------------------------------------------
+  // The tool only reads: the folder of the skill must be the same before and after.
+  const beforeUse = snapshotDir(path.join(SKILLS_DIR, 'summarise'));
   const use = await call('POST', '/api/mcp/call', { server: 'skills', tool: 'use_skill', arguments: { name: 'summarise' } });
   ok('use_skill answers', !!use.json && use.json.isError === false, use.text.slice(0, 200));
   const useText = (use.json && use.json.text) || '';
   ok('use_skill returns the body of the skill', /pass/i.test(useText), useText.slice(0, 200));
   ok('use_skill lists the files of the skill', /checklist\.md/.test(useText), useText.slice(-200));
-  ok('use_skill does not run anything', !/error/i.test(useText.slice(0, 40)), useText.slice(0, 60));
+  const afterUse = snapshotDir(path.join(SKILLS_DIR, 'summarise'));
+  ok('use_skill does not change the folder of the skill', beforeUse === afterUse && beforeUse.length > 10, afterUse.slice(0, 300));
   const useBad = await call('POST', '/api/mcp/call', { server: 'skills', tool: 'use_skill', arguments: { name: 'no-such-skill' } });
   ok('use_skill refuses a skill that does not exist', useBad.json && useBad.json.isError === true, useBad.text.slice(0, 160));
   const useBadName = await call('POST', '/api/mcp/call', { server: 'skills', tool: 'use_skill', arguments: { name: '../../etc' } });
@@ -331,7 +383,9 @@ const MODEL_SYS = [
   }
 
   const r1 = await askWithSkill('Use the skill named ' + TEST_SKILL + ' and follow its instructions.', 3);
-  ok('the model asked for the skill before it answered', !!(r1 && r1.used), JSON.stringify(r1 && r1.calls && r1.calls.map((c) => [c.tool, c.status])));
+  // The model asked for a tool called use_skill (whatever the tool answered is checked
+  // by the next assertion).
+  ok('the model called a tool named use_skill', !!(r1 && r1.used), JSON.stringify(r1 && r1.calls && r1.calls.map((c) => [c.tool, c.status])));
   ok('the skill was loaded', !!(r1 && r1.used && r1.used.status === 'done'), r1 && r1.used && r1.used.status);
   ok('the tool call was approved by the user', !!(r1 && r1.cardSeen), 'no approval card was shown');
   ok('the answer uses the content of the skill', !!(r1 && new RegExp(MARKER, 'i').test(r1.answer)), r1 && String(r1.answer).slice(0, 200));
@@ -348,13 +402,265 @@ const MODEL_SYS = [
 
   // ---- 12. the guard ---------------------------------------------------------------
   for (const [method, url] of [['GET', '/api/skills'], ['POST', '/api/skills'], ['PUT', '/api/skills/summarise'], ['DELETE', '/api/skills/summarise'],
-    ['POST', '/api/skills/upload'], ['POST', '/api/skills/summarise/files'], ['GET', '/api/skills/summarise']]) {
+    ['POST', '/api/skills/upload'], ['POST', '/api/skills/summarise/files'], ['GET', '/api/skills/summarise'],
+    ['DELETE', '/api/skills/summarise/files?path=checklist.md']]) {
     const r = await call(method, url, {}, { origin: 'http://evil.example' });
     ok(`a cross-site ${method} ${url} is refused`, r.status === 403, r.text.slice(0, 160));
   }
   const rSite = await call('GET', '/api/skills', undefined, { 'sec-fetch-site': 'cross-site' });
   ok('a request with Sec-Fetch-Site: cross-site is refused', rSite.status === 403, rSite.text.slice(0, 160));
   ok('the skills are still there after the cross-site requests', !!(await skillByName('summarise')) && !!(await skillByName('explain')));
+  ok('the file of a skill was not deleted by the cross-site request', fs.existsSync(path.join(SKILLS_DIR, 'summarise', 'checklist.md')));
+
+  // ---- 13. a starter that is deleted stays deleted; one that is edited stays edited ----
+  {
+    // The user switches a starter off and deletes it.
+    const off = await call('PUT', '/api/skills/summarise', { enabled: false });
+    ok('a starter can be switched off', off.status === 200 && off.json.enabled === false, off.text.slice(0, 160));
+    const del = await call('DELETE', '/api/skills/summarise');
+    ok('a starter can be deleted', del.status === 200, del.text.slice(0, 160));
+    ok('the folder of the deleted starter is gone', !fs.existsSync(path.join(SKILLS_DIR, 'summarise')));
+    // The name keeps a tombstone in the settings, so the starter is not copied over it.
+    // The server writes the settings with a short delay, so the file is read after it.
+    await sleep(500);
+    const saved = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'settings.json'), 'utf8'));
+    const tomb = (saved.skills || {}).summarise;
+    ok('the deleted starter is remembered as deleted', !!(tomb && tomb.removed === true), JSON.stringify(tomb));
+    ok('the deleted starter is not switched on again', !!(tomb && tomb.enabled === false), JSON.stringify(tomb));
+
+    // The other starter is edited.
+    const expl = await call('GET', '/api/skills/explain');
+    const marked = (expl.json.content || '') + '\nEDITED BY THE TEST\n';
+    const ed = await call('PUT', '/api/skills/explain', { content: marked });
+    ok('a starter can be edited', ed.status === 200 && /EDITED BY THE TEST/.test(ed.json.content || ''), ed.text.slice(0, 160));
+
+    // A leftover of an upload that crashed: it is swept away at the start.
+    const stale = path.join(SKILLS_DIR, '.staging-stale');
+    fs.mkdirSync(stale, { recursive: true });
+    fs.writeFileSync(path.join(stale, 'half.txt'), 'half a file');
+
+    // A restart: a second Lumen with the same data folder.
+    const s2 = await startServer(3196);
+    ok('the server starts again', s2.ok, 'the second server did not come up');
+    const list2 = await s2.call('GET', '/api/skills');
+    const names2 = ((list2.json || {}).skills || []).map((s) => s.name);
+    ok('a deleted starter does not come back after a restart', !names2.includes('summarise'), names2.join(','));
+    ok('the deleted starter is not in the list of the user', !(await skillByName('summarise')));
+    const expl2 = await s2.call('GET', '/api/skills/explain');
+    ok('an edited starter is still there after a restart', /EDITED BY THE TEST/.test((expl2.json || {}).content || ''),
+      String((expl2.json || {}).content || '').slice(-120));
+    ok('a leftover of an upload is swept away at the start', !fs.existsSync(stale));
+    s2.stop();
+  }
+
+  // ---- 14. an upload that replaces a skill of the same name --------------------
+  {
+    const created = await call('POST', '/api/skills', { name: 'replace-me', content: '---\nname: replace-me\ndescription: The old skill.\n---\n\nOLD BODY\n' });
+    ok('the skill that is replaced exists', created.status === 200, created.text.slice(0, 160));
+    const add = await call('POST', '/api/skills/replace-me/files', { path: 'notes.md', data: Buffer.from('OLD CONTENT').toString('base64') });
+    ok('the skill has a file of its own', add.status === 200, add.text.slice(0, 160));
+
+    const bundle = zip([
+      { name: 'SKILL.md', data: '---\nname: replace-me\ndescription: The new skill.\n---\n\nNEW BODY\n' },
+      { name: 'new.md', data: 'NEW CONTENT' },
+    ]);
+    const up = await call('POST', '/api/skills/upload', { name: 'replace-me', file: bundle.toString('base64') });
+    ok('a zip can replace a skill of the same name', up.status === 200, up.text.slice(0, 200));
+    ok('the old file of the skill is gone', !fs.existsSync(path.join(SKILLS_DIR, 'replace-me', 'notes.md')));
+    ok('the new file of the skill is there', fs.existsSync(path.join(SKILLS_DIR, 'replace-me', 'new.md')));
+    ok('the new content is in place', fs.readFileSync(path.join(SKILLS_DIR, 'replace-me', 'new.md'), 'utf8') === 'NEW CONTENT');
+    const reRead = await call('GET', '/api/skills/replace-me');
+    ok('the description of the new skill is in place', /The new skill/.test((reRead.json || {}).description || ''), (reRead.json || {}).description);
+
+    // A refused bundle must not destroy the skill that is there.
+    const bad = zip([{ name: '../escape.md', data: 'gotcha' }, { name: 'SKILL.md', data: '---\nname: replace-me\ndescription: bad\n---\n' }]);
+    const badRes = await call('POST', '/api/skills/upload', { name: 'replace-me', file: bad.toString('base64') });
+    ok('a refused bundle that would replace a skill is refused', badRes.status === 400, badRes.text.slice(0, 200));
+    ok('the skill is still there after the refused bundle', fs.existsSync(path.join(SKILLS_DIR, 'replace-me', 'new.md')));
+    ok('the content of the skill is untouched', fs.readFileSync(path.join(SKILLS_DIR, 'replace-me', 'new.md'), 'utf8') === 'NEW CONTENT');
+  }
+
+  // ---- 15. the dialog warns before it replaces a skill ------------------------
+  {
+    // A zip on the disk, for the file picker of the dialog.
+    const zipPath = path.join(TMP, 'replace-ui.zip');
+    fs.writeFileSync(zipPath, zip([
+      { name: 'SKILL.md', data: '---\nname: replace-me\ndescription: The new skill from the dialog.\n---\n\nNEW BODY\n' },
+      { name: 'ui.md', data: 'UI CONTENT' },
+    ]));
+    await ev(`loadSkills().then(() => 1)`);
+    // The dialog asks with prompt() and confirm(): both are stubbed, so the test sees
+    // what the user would see.
+    await ev(`(() => {
+      window.__prompts = []; window.__confirms = [];
+      window.prompt = (m, d) => { window.__prompts.push(String(m)); return window.__promptAnswer || d; };
+      window.confirm = (m) => { window.__confirms.push(String(m)); return window.__confirmAnswer !== false; };
+      window.__promptAnswer = 'replace-me'; window.__confirmAnswer = false;
+      return 1;
+    })()`);
+    await h.setFiles('#skillZipInput', [zipPath]);
+    await ev(`(() => { document.querySelector('#skillZipInput').dispatchEvent(new Event('change')); return 1; })()`);
+    await sleep(2000);
+    const confirms = String(await ev(`JSON.stringify(window.__confirms)`));
+    ok('the dialog warns before it replaces a skill', /replace-me/.test(confirms) && /replac/i.test(confirms), confirms.slice(0, 300));
+    ok('the warning says what is lost', /file/i.test(confirms), confirms.slice(0, 300));
+    ok('a cancelled upload does not replace the skill',
+      !fs.existsSync(path.join(SKILLS_DIR, 'replace-me', 'ui.md')) && fs.existsSync(path.join(SKILLS_DIR, 'replace-me', 'new.md')));
+    // And with the answer "yes" the skill is replaced.
+    await ev(`window.__confirmAnswer = true; 1`);
+    await h.setFiles('#skillZipInput', [zipPath]);
+    await ev(`(() => { document.querySelector('#skillZipInput').dispatchEvent(new Event('change')); return 1; })()`);
+    await sleep(2500);
+    ok('an accepted upload replaces the skill', fs.existsSync(path.join(SKILLS_DIR, 'replace-me', 'ui.md')),
+      fs.readdirSync(path.join(SKILLS_DIR, 'replace-me')).join(','));
+  }
+
+  // ---- 16. a symlink never leads out of the skills folder ----------------------
+  {
+    // A skill folder that is a symlink to a folder outside data/skills.
+    const outside = path.join(TMP, 'outside-skill');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'SKILL.md'), '---\nname: linked-skill\ndescription: OUTSIDE SKILL\n---\n\nSECRET OUTSIDE CONTENT\n');
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'SECRET OUTSIDE CONTENT');
+    const linkDir = path.join(SKILLS_DIR, 'linked-skill');
+    try { fs.unlinkSync(linkDir); } catch { /* not there */ }
+    fs.symlinkSync(outside, linkDir, 'dir');
+    const l = (await call('GET', '/api/skills')).json || {};
+    ok('a skill that is a symlink is not in the list', !(l.skills || []).some((s) => s.name === 'linked-skill'),
+      JSON.stringify((l.skills || []).map((s) => s.name)));
+    const useLink = await call('POST', '/api/mcp/call', { server: 'skills', tool: 'use_skill', arguments: { name: 'linked-skill' } });
+    ok('a skill that is a symlink cannot be used', useLink.json && useLink.json.isError === true && !/SECRET OUTSIDE/.test(useLink.json.text || ''),
+      useLink.text.slice(0, 200));
+    const readLink = await call('POST', '/api/mcp/call', { server: 'skills', tool: 'read_skill_file', arguments: { name: 'linked-skill', path: 'secret.txt' } });
+    ok('a file of a symlinked skill cannot be read', readLink.json && readLink.json.isError === true && !/SECRET OUTSIDE/.test(readLink.json.text || ''),
+      readLink.text.slice(0, 200));
+
+    // A symlinked folder inside a skill: a write, a delete and a read through it.
+    const target = path.join(TMP, 'outside-dir');
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, 'keep.txt'), 'DO NOT TOUCH');
+    const sub = path.join(SKILLS_DIR, 'replace-me', 'sub');
+    try { fs.unlinkSync(sub); } catch { /* not there */ }
+    fs.symlinkSync(target, sub, 'dir');
+    const addSub = await call('POST', '/api/skills/replace-me/files', { path: 'sub/evil.md', data: Buffer.from('gotcha').toString('base64') });
+    ok('a write through a symlinked folder is refused', addSub.status === 400, addSub.text.slice(0, 200));
+    ok('nothing was written through the symlink', !fs.existsSync(path.join(target, 'evil.md')));
+    const delSub = await call('DELETE', '/api/skills/replace-me/files?path=' + encodeURIComponent('sub/keep.txt'));
+    ok('a delete through a symlinked folder is refused', delSub.status === 400, delSub.text.slice(0, 200));
+    ok('the file outside was not deleted', fs.existsSync(path.join(target, 'keep.txt')));
+    const readSub = await call('POST', '/api/mcp/call', { server: 'skills', tool: 'read_skill_file', arguments: { name: 'replace-me', path: 'sub/keep.txt' } });
+    ok('a read through a symlinked folder is refused', readSub.json && readSub.json.isError === true && !/DO NOT TOUCH/.test(readSub.json.text || ''),
+      readSub.text.slice(0, 200));
+  }
+
+  // ---- 17. read_skill_file returns at most 1 MB --------------------------------
+  {
+    const created = await call('POST', '/api/skills', { name: 'bigread', content: '---\nname: bigread\ndescription: A file that is too big to read.\n---\n' });
+    ok('the skill for the read limit exists', created.status === 200, created.text.slice(0, 160));
+    // 1.5 MB of a three-byte character: half a million characters, but 1.5 MB of bytes.
+    const cjk = Buffer.from('日'.repeat(500000), 'utf8');
+    const add = await call('POST', '/api/skills/bigread/files', { path: 'cjk.txt', data: cjk.toString('base64') });
+    ok('the big file can be added to the skill', add.status === 200, add.text.slice(0, 160));
+    const rf = await call('POST', '/api/mcp/call', { server: 'skills', tool: 'read_skill_file', arguments: { name: 'bigread', path: 'cjk.txt' } });
+    const text = (rf.json || {}).text || '';
+    ok('the big file is read', rf.json && rf.json.isError !== true && text.length > 0, rf.text.slice(0, 200));
+    ok('the read is cut off at 1 MB of bytes', Buffer.byteLength(text, 'utf8') <= 1024 * 1024 + 64, String(Buffer.byteLength(text, 'utf8')));
+    ok('the cut off says so', /truncat/i.test(text), text.slice(-60));
+  }
+
+  // ---- 18. no skill on, no skills server ----------------------------------------
+  {
+    const all = ((await call('GET', '/api/skills')).json || {}).skills || [];
+    for (const s of all) await call('PUT', '/api/skills/' + encodeURIComponent(s.name), { enabled: false });
+    const mcp2 = await call('GET', '/api/mcp');
+    ok('the skills server is hidden when no skill is on', !((mcp2.json || [])).some((s) => s.id === 'skills'),
+      JSON.stringify((mcp2.json || []).map((s) => s.id)));
+    await ev(`loadMcp().then(() => 1)`);
+    const tn = await ev(`JSON.stringify((buildTools() || { defs: [] }).defs.map((d) => d.function.name))`);
+    ok('no skills tool is sent to the model', !/skills__/.test(tn), tn);
+    await call('PUT', '/api/skills/explain', { enabled: true });
+    const mcp3 = await call('GET', '/api/mcp');
+    ok('the skills server is there again when a skill is on', ((mcp3.json || [])).some((s) => s.id === 'skills'),
+      JSON.stringify((mcp3.json || []).map((s) => s.id)));
+  }
+
+  // ---- 19. the upload never writes outside the skills folder ---------------------
+  {
+    const before = fs.readdirSync(DATA_DIR).sort().join(',');
+    const bundle = zip([
+      { name: 'SKILL.md', data: '---\nname: staged\ndescription: A skill that is staged.\n---\n' },
+      { name: 'notes.md', data: 'notes' },
+    ]);
+    const up = await call('POST', '/api/skills/upload', { name: 'staged', file: bundle.toString('base64') });
+    ok('the zip is uploaded', up.status === 200, up.text.slice(0, 160));
+    ok('nothing was written next to the skills folder', fs.readdirSync(DATA_DIR).sort().join(',') === before,
+      fs.readdirSync(DATA_DIR).sort().join(','));
+    ok('no staging folder is left in the skills folder',
+      !fs.readdirSync(SKILLS_DIR).some((n) => n.startsWith('.staging-')), fs.readdirSync(SKILLS_DIR).join(','));
+    const bad = zip([{ name: '../escape.md', data: 'gotcha' }, { name: 'SKILL.md', data: '---\nname: staged2\ndescription: bad\n---\n' }]);
+    const badRes = await call('POST', '/api/skills/upload', { name: 'staged2', file: bad.toString('base64') });
+    ok('the refused bundle is refused', badRes.status === 400, badRes.text.slice(0, 160));
+    ok('nothing was written next to the skills folder after the refusal', fs.readdirSync(DATA_DIR).sort().join(',') === before,
+      fs.readdirSync(DATA_DIR).sort().join(','));
+    ok('no staging folder is left after the refusal', !fs.readdirSync(SKILLS_DIR).some((n) => n.startsWith('.staging-')),
+      fs.readdirSync(SKILLS_DIR).join(','));
+  }
+
+  // ---- 20. a zip whose SKILL.md is in a folder of its own ------------------------
+  {
+    const bundle = zip([
+      { name: 'inner-skill/SKILL.md', data: '---\nname: inner-skill\ndescription: A skill in a folder of its own.\n---\n\nINNER BODY\n' },
+      { name: 'inner-skill/notes.md', data: 'INNER NOTES' },
+    ]);
+    const up = await call('POST', '/api/skills/upload', { name: 'inner-skill', file: bundle.toString('base64') });
+    ok('a zip with the SKILL.md in a folder of its own is uploaded', up.status === 200 && up.json.name === 'inner-skill', up.text.slice(0, 200));
+    ok('the folder of the bundle is unwrapped',
+      fs.existsSync(path.join(SKILLS_DIR, 'inner-skill', 'SKILL.md')) && fs.existsSync(path.join(SKILLS_DIR, 'inner-skill', 'notes.md')),
+      fs.existsSync(path.join(SKILLS_DIR, 'inner-skill')) ? fs.readdirSync(path.join(SKILLS_DIR, 'inner-skill')).join(',') : 'no folder');
+    const useInner = await call('POST', '/api/mcp/call', { server: 'skills', tool: 'use_skill', arguments: { name: 'inner-skill' } });
+    ok('the skill of the bundle can be used', useInner.json && useInner.json.isError !== true && /INNER BODY/.test(useInner.json.text || ''),
+      useInner.text.slice(0, 200));
+  }
+
+  // ---- 21. the API through the browser's own fetch --------------------------------
+  // The calls above come from Node, with the headers a browser sends. These come from
+  // the page itself, so the browser adds its own Host, Origin and Sec-Fetch-Site
+  // headers and the request goes through guard() the way a request of the user does.
+  {
+    const raw = await ev(`(async () => {
+      const out = {};
+      const j = async (p, o) => {
+        const r = await fetch('/api' + p, { ...o, headers: { 'content-type': 'application/json' } });
+        let body = null; try { body = await r.json(); } catch (e) { body = null; }
+        return { status: r.status, body };
+      };
+      const list = await j('/skills');
+      out.list = list.status;
+      out.names = ((list.body && list.body.skills) || []).map(s => s.name);
+      const made = await j('/skills', { method: 'POST', body: JSON.stringify({ name: 'browser-skill' }) });
+      out.made = made.status;
+      out.madeName = made.body && made.body.name;
+      const off = await j('/skills/browser-skill', { method: 'PUT', body: JSON.stringify({ enabled: false }) });
+      out.off = off.status;
+      out.offEnabled = off.body && off.body.enabled;
+      const gone = await j('/skills/browser-skill', { method: 'DELETE' });
+      out.gone = gone.status;
+      // A body that is not JSON is refused by the guard, like a cross-site form post.
+      const notJson = await fetch('/api/skills', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'name=evil' });
+      out.notJson = notJson.status;
+      return JSON.stringify(out);
+    })()`);
+    let b = {};
+    try { b = JSON.parse(raw); } catch { /* the page threw */ }
+    ok('the browser reaches the skills route', b.list === 200, String(raw).slice(0, 200));
+    ok('the browser sees the skills that are there, and not the deleted one',
+      Array.isArray(b.names) && b.names.includes('explain') && !b.names.includes('summarise'), JSON.stringify(b.names));
+    ok('a skill can be created from the browser', b.made === 200 && b.madeName === 'browser-skill', String(b.made) + ' ' + String(b.madeName));
+    ok('a skill can be switched off from the browser', b.off === 200 && b.offEnabled === false, String(b.off) + ' ' + String(b.offEnabled));
+    ok('a skill can be deleted from the browser', b.gone === 200, String(b.gone));
+    ok('a body that is not JSON is refused in the browser too', b.notJson === 415, String(b.notJson));
+    ok('the skill of the browser is really gone', !fs.existsSync(path.join(SKILLS_DIR, 'browser-skill')));
+  }
 
   h.close();
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

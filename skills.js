@@ -68,6 +68,46 @@ const defaultSkillMd = (name) => [
 ].join('\n');
 
 // ---- the files of a skill ----------------------------------------------------------
+// The real path of the root of the skills. Every path of a skill must stay inside it:
+// a skill folder that is a symlink to a folder outside is not a skill.
+const realRoot = (root) => { try { return fs.realpathSync(root); } catch { return path.resolve(root); } };
+// Is this path inside the real root of the skills?
+const insideRoot = (root, p) => {
+  const rr = realRoot(root);
+  return !!p && (p === rr || p.startsWith(rr + path.sep));
+};
+// The path of a file inside a skill. Every segment of the path is checked: a symlink in
+// the way is refused, and the real path of the target must stay inside the real root of
+// the skills — not inside the folder of the skill, which may itself be a symlink.
+function safeInside(root, dir, rel) {
+  const base = path.resolve(dir);
+  let realBase = null;
+  try { realBase = fs.realpathSync(base); } catch { realBase = null; }
+  if (!realBase) throw new Error('There is no skill called "' + path.basename(base) + '"');
+  if (!insideRoot(root, realBase)) throw new Error('That path would leave the folder of the skills');
+  let cur = base;
+  for (const part of rel.split('/')) {
+    cur = path.join(cur, part);
+    let st = null;
+    try { st = fs.lstatSync(cur); } catch { st = null; } // the last part may be new
+    if (st && st.isSymbolicLink()) throw new Error('A symlink is not used');
+  }
+  let real = null;
+  try { real = fs.realpathSync(cur); } catch { real = null; }
+  if (real && !insideRoot(root, real)) throw new Error('That path would leave the folder of the skills');
+  return { base, target: cur };
+}
+// The SKILL.md of a skill. A symlink is never read.
+function readSkillMd(root, dir) {
+  const p = path.join(dir, 'SKILL.md');
+  let st = null;
+  try { st = fs.lstatSync(p); } catch { st = null; }
+  if (!st || st.isSymbolicLink()) return '';
+  let real = null;
+  try { real = fs.realpathSync(p); } catch { real = null; }
+  if (!real || !insideRoot(root, real)) return '';
+  try { return fs.readFileSync(p, 'utf8'); } catch { return ''; }
+}
 // Every file of the folder, with its size. A symlink is listed, but it is never read.
 function walk(dir, rel) {
   const out = [];
@@ -102,9 +142,16 @@ const isEnabled = (settings, name) => {
   const rec = settings.skills && settings.skills[name];
   return !rec || rec.enabled !== false;
 };
+// A skill that the user deleted keeps a tombstone, so it is never copied over again.
+const isRemoved = (settings, name) => !!(settings.skills && settings.skills[name] && settings.skills[name].removed);
 function setEnabled(settings, name, on) {
   if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
   settings.skills[name] = { ...(settings.skills[name] || {}), enabled: !!on };
+}
+// The name stays in the settings as deleted: the starter skills are not installed again.
+function markRemoved(settings, name) {
+  if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
+  settings.skills[name] = { ...(settings.skills[name] || {}), enabled: false, removed: true };
 }
 
 // Every skill that is on the disk.
@@ -114,12 +161,16 @@ function list(root, settings) {
   try { names = fs.readdirSync(root); } catch { names = []; }
   for (const name of names.sort()) {
     if (!validName(name)) continue;
+    if (isRemoved(settings, name)) continue; // a deleted skill stays deleted
     const dir = skillDir(root, name);
     let st;
     try { st = fs.statSync(dir); } catch { continue; }
     if (!st.isDirectory()) continue;
-    let content = '';
-    try { content = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'); } catch { content = ''; }
+    // A skill folder that is a symlink to a folder outside the skills is not a skill.
+    let realDir = null;
+    try { realDir = fs.realpathSync(dir); } catch { realDir = null; }
+    if (!realDir || !insideRoot(root, realDir)) continue;
+    const content = readSkillMd(root, dir);
     const files = walk(dir);
     out.push({
       name,
@@ -132,13 +183,31 @@ function list(root, settings) {
   }
   return out;
 }
+// Is there a skill that the model may use? Without one the skills tools are not offered.
+function anyEnabled(root, settings) {
+  let names = [];
+  try { names = fs.readdirSync(root); } catch { return false; }
+  for (const name of names) {
+    if (!validName(name)) continue;
+    if (isRemoved(settings, name)) continue;
+    if (!isEnabled(settings, name)) continue;
+    const dir = skillDir(root, name);
+    if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
+    // A skill folder that is a symlink to a folder outside the skills is not a skill.
+    let realDir = null;
+    try { realDir = fs.realpathSync(dir); } catch { realDir = null; }
+    if (!realDir || !insideRoot(root, realDir)) continue;
+    return true;
+  }
+  return false;
+}
 // One skill with everything the browser needs.
 function read(root, settings, name) {
   name = asName(name);
   if (!validName(name)) throw new Error(nameError);
   const dir = skillDir(root, name);
   if (!fs.existsSync(path.join(dir, 'SKILL.md'))) throw new Error('There is no skill called "' + name + '"');
-  const content = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8');
+  const content = readSkillMd(root, dir);
   const files = walk(dir);
   return {
     name, description: describe(content), content, files,
@@ -155,7 +224,9 @@ function create(root, settings, body) {
   if (Buffer.byteLength(content) > MAX_BYTES) throw new Error('The SKILL.md is bigger than the limit of 30 MB (' + MAX_BYTES + ' bytes)');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'SKILL.md'), content, { mode: 0o600 });
-  setEnabled(settings, name, true);
+  // A name that was deleted before is a new skill now: the tombstone goes.
+  if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
+  settings.skills[name] = { enabled: true };
   return read(root, settings, name);
 }
 // Edit the SKILL.md of a skill and switch it on or off.
@@ -173,14 +244,15 @@ function update(root, settings, name, body) {
   if (body && typeof body.enabled === 'boolean') setEnabled(settings, name, body.enabled);
   return read(root, settings, name);
 }
-// Remove a skill and its folder.
+// Remove a skill and its folder. The name keeps a tombstone, so a starter skill that
+// the user deleted is not installed again at the next start.
 function remove(root, settings, name) {
   name = asName(name);
   if (!validName(name)) throw new Error(nameError);
   const dir = skillDir(root, name);
   if (!fs.existsSync(dir)) throw new Error('There is no skill called "' + name + '"');
   fs.rmSync(dir, { recursive: true, force: true });
-  if (settings.skills) delete settings.skills[name];
+  markRemoved(settings, name);
   return { ok: true };
 }
 // One more file in the folder of a skill.
@@ -191,8 +263,7 @@ function addFile(root, settings, name, relPath, buf) {
   if (!fs.existsSync(dir)) throw new Error('There is no skill called "' + name + '"');
   const rel = safeRel(relPath);
   if (!rel) throw new Error('That is not a valid path inside a skill');
-  const base = path.resolve(dir), target = path.resolve(base, ...rel.split('/'));
-  if (!target.startsWith(base + path.sep)) throw new Error('That path would leave the folder of the skill');
+  const { target } = safeInside(root, dir, rel);
   const current = folderSize(walk(dir));
   if (current + buf.length > MAX_BYTES) throw new Error('The skill would be bigger than the limit of 30 MB (' + MAX_BYTES + ' bytes)');
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -207,8 +278,7 @@ function removeFile(root, settings, name, relPath) {
   if (!fs.existsSync(dir)) throw new Error('There is no skill called "' + name + '"');
   const rel = safeRel(relPath);
   if (!rel) throw new Error('That is not a valid path inside a skill');
-  const base = path.resolve(dir), target = path.resolve(base, ...rel.split('/'));
-  if (!target.startsWith(base + path.sep)) throw new Error('That path would leave the folder of the skill');
+  const { target } = safeInside(root, dir, rel);
   if (!fs.existsSync(target)) throw new Error('There is no file called "' + rel + '" in this skill');
   fs.rmSync(target, { recursive: true, force: true });
   return { ok: true };
@@ -219,7 +289,9 @@ function removeFile(root, settings, name, relPath) {
 function extract(root, settings, name, buf) {
   name = asName(name).trim();
   if (!validName(name)) throw new Error(nameError);
-  const staging = path.join(path.dirname(root), '.skills-upload-' + crypto.randomUUID());
+  // The bundle is unpacked inside the folder of the skills: Lumen never writes next to
+  // it. The name of the folder is not a skill name, so it is never listed.
+  const staging = path.join(root, '.staging-' + crypto.randomUUID());
   let inner = null;
   try {
     zip.extract(buf, staging, ZIP_LIMITS);
@@ -231,7 +303,7 @@ function extract(root, settings, name, buf) {
       if (dirs.size === 1) {
         const d = [...dirs][0];
         if (files.includes(d + '/SKILL.md')) {
-          inner = path.join(path.dirname(staging), path.basename(staging) + '-inner');
+          inner = path.join(root, '.staging-' + crypto.randomUUID() + '-inner');
           fs.mkdirSync(inner, { recursive: true });
           for (const n of fs.readdirSync(path.join(staging, d))) fs.renameSync(path.join(staging, d, n), path.join(inner, n));
           fs.rmSync(staging, { recursive: true, force: true });
@@ -243,9 +315,19 @@ function extract(root, settings, name, buf) {
     const size = folderSize(walk(src));
     if (size > MAX_BYTES) throw new Error('The skill would be bigger than the limit of 30 MB (' + MAX_BYTES + ' bytes)');
     const dir = skillDir(root, name);
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.mkdirSync(path.dirname(dir), { recursive: true });
-    fs.renameSync(src, dir);
+    // The old folder is moved aside first and only deleted when the new one is in
+    // place: a bundle that fails on the way leaves the skill of the user untouched.
+    const backup = dir + '.old-' + crypto.randomUUID();
+    let hadOld = false;
+    if (fs.existsSync(dir)) { fs.renameSync(dir, backup); hadOld = true; }
+    try {
+      fs.mkdirSync(path.dirname(dir), { recursive: true });
+      fs.renameSync(src, dir);
+    } catch (e) {
+      if (hadOld) { try { fs.renameSync(backup, dir); } catch { /* the old folder stays where it is */ } }
+      throw e;
+    }
+    if (hadOld) { try { fs.rmSync(backup, { recursive: true, force: true }); } catch { /* nothing to clean */ } }
   } finally {
     // Nothing of a refused bundle stays on the disk.
     for (const dir of [staging, inner]) {
@@ -253,15 +335,23 @@ function extract(root, settings, name, buf) {
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* nothing to clean */ }
     }
   }
-  setEnabled(settings, name, isEnabled(settings, name));
+  if (isRemoved(settings, name)) {
+    // The user uploads this name again: the skill is a new one, so it is on.
+    if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
+    settings.skills[name] = { enabled: true };
+  } else {
+    setEnabled(settings, name, isEnabled(settings, name));
+  }
   return read(root, settings, name);
 }
 // The starter skills: they are copied into the data folder once, and never overwritten.
-function ensureStarters(root) {
+// A starter that the user deleted stays deleted (the name keeps a tombstone).
+function ensureStarters(root, settings) {
   let names = [];
   try { names = fs.readdirSync(STARTER_DIR); } catch { return; }
   for (const name of names) {
     if (!validName(name)) continue;
+    if (settings && isRemoved(settings, name)) continue;
     const src = path.join(STARTER_DIR, name), dir = skillDir(root, name);
     if (fs.existsSync(path.join(dir, 'SKILL.md'))) continue; // the user may have edited it
     fs.mkdirSync(dir, { recursive: true });
@@ -270,6 +360,15 @@ function ensureStarters(root) {
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.copyFileSync(path.join(src, ...f.path.split('/')), target);
     }
+  }
+}
+// The folders of the uploads that a crash left behind are swept away at the start.
+function sweepStaging(root) {
+  let names = [];
+  try { names = fs.readdirSync(root); } catch { return; }
+  for (const n of names) {
+    if (!n.startsWith('.staging-')) continue;
+    try { fs.rmSync(path.join(root, n), { recursive: true, force: true }); } catch { /* nothing to clean */ }
   }
 }
 
@@ -300,7 +399,12 @@ function mustExist(root, settings, name) {
   const dir = skillDir(root, name);
   if (!fs.existsSync(path.join(dir, 'SKILL.md'))) throw new Error('There is no skill called "' + name + '"');
   if (!isEnabled(settings, name)) throw new Error('The skill "' + name + '" is switched off in Lumen');
-  const content = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8');
+  // The folder of the skill must be a real folder inside the skills: a skill folder that
+  // is a symlink to a folder outside is not a skill of the user.
+  let realDir = null;
+  try { realDir = fs.realpathSync(dir); } catch { realDir = null; }
+  if (!realDir || !insideRoot(root, realDir)) throw new Error('That path would leave the folder of the skills');
+  const content = readSkillMd(root, dir);
   return { name, dir, content, description: describe(content) };
 }
 // use_skill: the body of the SKILL.md and the list of the files.
@@ -323,21 +427,26 @@ function readSkillFile(root, settings, name, relPath) {
   const sk = mustExist(root, settings, name);
   const rel = safeRel(relPath);
   if (!rel) throw new Error('That is not a valid path inside a skill');
-  const base = path.resolve(sk.dir), target = path.resolve(base, ...rel.split('/'));
-  if (!target.startsWith(base + path.sep)) throw new Error('That path would leave the folder of the skill');
+  // Every segment of the path is checked: a symlink in the way is refused, and the real
+  // path must stay inside the real root of the skills.
+  const { target } = safeInside(root, sk.dir, rel);
   let st;
   try { st = fs.lstatSync(target); } catch { throw new Error('There is no file called "' + rel + '" in this skill'); }
   if (st.isSymbolicLink()) throw new Error('A symlink is not read');
   if (st.isDirectory()) throw new Error('"' + rel + '" is a folder, not a file');
-  // A symlink further up the path must not lead out of the folder either.
-  const real = fs.realpathSync(target);
-  let realBase;
-  try { realBase = fs.realpathSync(base); } catch { realBase = base; }
-  if (!real.startsWith(realBase + path.sep)) throw new Error('That path would leave the folder of the skill');
-  const buf = fs.readFileSync(real);
+  // The cap is counted in bytes, and a file that is too big is cut off on the disk: it
+  // is never read whole.
+  let buf;
+  if (st.size > MAX_READ) {
+    const fd = fs.openSync(target, 'r');
+    try { buf = Buffer.alloc(MAX_READ); fs.readSync(fd, buf, 0, MAX_READ, 0); }
+    finally { fs.closeSync(fd); }
+  } else {
+    buf = fs.readFileSync(target);
+  }
   if (buf.includes(0)) throw new Error('"' + rel + '" is not a text file');
   let text = buf.toString('utf8');
-  if (text.length > MAX_READ) text = text.slice(0, MAX_READ) + '\n…[truncated]';
+  if (st.size > MAX_READ) text += '\n…[truncated]';
   return text;
 }
 // The call of a tool of the skills server. Nothing is ever written here.
@@ -355,5 +464,6 @@ async function call(tool, args, ctx) {
 module.exports = {
   NAME_RE, MAX_BYTES, MAX_READ, validName, parseFrontmatter, describe,
   list, read, create, update, remove, addFile, removeFile, extract, ensureStarters,
+  sweepStaging, anyEnabled, isRemoved,
   tools, call, useSkill, readSkillFile,
 };

@@ -272,16 +272,27 @@ Handoff notes:
   enforced on the folder as a whole after the extraction, on a hand-written `SKILL.md` and on a loose file. The limits are measured on the bytes that are really
   produced, not on the sizes the bundle claims. The ratio limit of the general bundle reader (200:1) is **2000:1 for skill bundles**: there the 30 MB byte limits are the
   ceiling, and 200:1 would refuse a legitimate file of zeroes (a deflate stream cannot expand more than about 1000:1 anyway).
-- **A bundle is unpacked into a folder of its own first** (`data/.skills-upload-<uuid>`), so a bundle that is refused leaves nothing behind and the skill of the user is
-  only replaced when the bundle is good. A bundle whose `SKILL.md` sits in a folder of its own is accepted (the folder is unwrapped).
+- **A bundle is unpacked into a folder of its own first** (`data/skills/.staging-<uuid>`), so a bundle that is refused leaves nothing behind and the skill of the user is
+  only replaced when the bundle is good. The staging folder is **inside** `data/skills/` (Lumen never writes next to it) and its name is not a skill name, so it is never
+  listed; a folder of it that a crash left behind is swept away at the next start (`skills.sweepStaging()`). A bundle whose `SKILL.md` sits in a folder of its own is
+  accepted (the folder is unwrapped).
+- **An upload that replaces a skill says so.** The dialog asks first ("There is already a skill called X. This upload replaces it: its N files (…) are removed…") and
+  the server is careful: the old folder is **moved aside** (`<name>.old-<uuid>`) and only deleted when the new folder is in place — a bundle that fails on the way puts
+  the old skill back.
 - **The name is a folder name**, so it must match `^[a-z0-9][a-z0-9_-]{0,39}$` — no slashes, no dots, no `..`, no spaces, at most 40 characters. A path inside a skill may
-  not be absolute, may not hold `..`, and **a symlink is never read** — not the file itself and not a folder on the way to it (`read_skill_file` refuses a symlink and
-  checks the real path against the real path of the folder).
-- **The tools are read-only.** `use_skill` returns the body of the `SKILL.md` and the list of the files; `read_skill_file` returns one text file (at most 1 MB, then it is
-  cut off). Neither writes, deletes nor runs anything. A skill that is switched off is refused by both and is not in the system prompt.
+  not be absolute, may not hold `..`, and **a symlink is never used** — not the file itself and not a folder on the way to it. Every path is held against the **real
+  path of `data/skills/`** (not against the folder of the skill, which may itself be a symlink) and every segment of the path is checked with `lstat` on the write and
+  the delete path, so a symlinked folder inside a skill cannot redirect a write or a delete out of it.
+- **The tools are read-only.** `use_skill` returns the body of the `SKILL.md` and the list of the files; `read_skill_file` returns one text file (at most 1 MB **of
+  bytes**, counted with `Buffer.byteLength` — the file is cut off on the disk, not read whole — and the answer says that it was cut off). Neither writes, deletes nor
+  runs anything. A skill that is switched off is refused by both and is not in the system prompt.
 - **The system prompt** lists only the enabled skills, with their names and their one-line description, and the block says that the text of a skill is material the user
   installed on this computer — not an instruction of Lumen.
-- **The starter skills** are copied into `data/skills/` on the first run and are **never overwritten** (the user may have edited them).
+- **The starter skills** are copied into `data/skills/` on the first run and are **never overwritten** (the user may have edited them). A starter that the user
+  **deleted** stays deleted: the name keeps a tombstone in the settings (`settings.skills[name].removed = true`, and `enabled = false`), `ensureStarters()` skips it
+  and the list of the skills does not show it. A new skill with the same name clears the tombstone.
+- **The skills server appears only while a skill is switched on** (like the web server, which appears when the web tools are on). With every skill off, Lumen sends
+  no skills tool to the model at all and the server is not in the list of the servers.
 - **The built-in Skills server changes what the earlier steps' tests see.** It is always in the list of the servers (`GET /api/mcp`), so the list is never
   empty any more and the header badge counts 2 tools more. Three assertions of the earlier steps were therefore changed (the same run on the base commit
   `f8c05f7` is green without them): `tests/step5-styles-memory.js` — "Normal adds nothing" now asks that the *style* adds no text (the skills block is in the
@@ -294,8 +305,33 @@ Handoff notes:
 - **Traps in the tests** (worth knowing for the later steps): the CDP harness answers with a truthy `"EXC …"` string when the page throws, so a boolean check has to be
   compared with `=== true` (the step-10 test has a `t()` helper for that); `fetch` refuses a body on `GET` (the test helper must not send one); and a test must not crash
   when the route does not exist yet — it has to report a failure and keep going.
-- Not covered by the tests: a zip with the `SKILL.md` in a folder of its own (it works, the test does not cover it), a file of more than 1 MB in one go (it is cut off),
-  and a skill whose name is `upload` (the name is reserved for the upload route).
+- Not covered by the tests: a skill whose name is `upload` (it works: only `POST /api/skills/upload` is the upload route, the other verbs take the name as it is),
+  and the real drag-and-drop of the file picker (the test sets the files of the input).
+
+**Fix round 1** (the review of the first commit; the changes are in the commit after `afc421a`):
+
+- **A deleted starter does not come back.** The delete leaves a tombstone in the settings (`removed: true`, `enabled: false`) and `ensureStarters()` skips it, so a
+  starter that the user deleted stays deleted — and stays off — after a restart. A starter that the user only **edited** is still there after a restart.
+  (`tests/step10-skills.js`: "a deleted starter does not come back after a restart", "an edited starter is still there after a restart". The test starts a second
+  Lumen with the same data folder — the code path of a restart.)
+- **An upload that replaces a skill says so, and it does not destroy the old skill on the way.** The dialog warns (and can be cancelled); the server moves the old
+  folder aside and deletes it only when the new folder is in place.
+- **The containment is against the real path of `data/skills/`**, and every segment of a path is checked with `lstat` on the write and the delete path. A skill folder
+  that is a symlink to a folder outside is not a skill, and a symlinked folder inside a skill cannot redirect a write or a delete.
+- **The read cap counts bytes**, not characters, and a file that is too big is cut off on the disk.
+- **The skills server is hidden when no skill is on**, so the model gets no useless tool definitions.
+- **The staging folder of an upload is inside `data/skills/`**, and a leftover of a crash is swept away at the start.
+- The tests grew: the deleted/edited starter over a restart, the upload that replaces a skill, the symlinked skill folder and the symlinked subfolder, the read cap,
+  the hidden server, the staging folder, a zip whose `SKILL.md` is in a subfolder, and `DELETE /api/skills/:name/files` in the list of the cross-site requests. Two
+  assertions that proved nothing were replaced: "use_skill does not run anything" now compares the folder of the skill (size, mtime and hash of every file) before
+  and after the call, and the assertion about the model is now "the model called a tool named use_skill" (what it actually proves).
+- `tests/step4-thinking-branches.js` waits for the **reply of the assistant** before it checks that there is no reasoning block (before that, the last message could be
+  the one of the user and the assertion proved nothing).
+- The CDP harness answers a pending approval card like a user would ("Allow once") and waits for the turn to be over (`tests/lib/cdplib.js`, `finishTurn()` and `ask()`), and it
+  waits for a message whose role is **assistant** and whose content is not empty. A skill in the system prompt can make the model ask to use a skill, and the turn then waits
+  for the card: step 3 was the next step that hung on it, and it uses the harness now. The assertions of the earlier steps did not change.
+- The skills API is also called **from the page itself** (the browser's own `fetch`, with the browser's own Host/Origin/Sec-Fetch-Site headers), so `guard()` is exercised the
+  way a request of the user goes through it. The other calls of the test come from Node with the headers a browser sends.
 
 ### Step 11: Side Chat and Split View
 - **Side Chat:** right panel with its own thread seeded with a snapshot of the main conversation ("answer briefly; this is a side question"); never modifies the main chat;

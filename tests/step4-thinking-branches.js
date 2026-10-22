@@ -129,9 +129,17 @@ const { launch, sleep } = require('./lib/cdplib');
 
   // ---- thinking OFF -------------------------------------------------------
   await ev(`document.querySelector('#thinkToggle').click(); 1`);
+  const beforeOff = await ev(`state.chat.messages.length`);
   await ev(`send('Reply with the single word: pong'); 1`);
   await finishTurn();
-  ok('with Thinking off, no reasoning block is produced', (await ev(`state.chat.messages.at(-1).thinking || ''`)) === '');
+  // The reply of the assistant must really be there: without it the message that is
+  // checked below would be the one of the user, and the assertion would prove nothing.
+  const gotReply = await waitFor(`state.chat.messages.length >= ${beforeOff + 2} && (state.chat.messages.at(-1) || {}).role === 'assistant'`, 120000);
+  ok('the reply of the assistant is there', gotReply, 'messages: ' + String(await ev(`state.chat.messages.length`)));
+  const offRole = await ev(`(state.chat.messages.at(-1) || {}).role`);
+  const offThinking = await ev(`(state.chat.messages.at(-1) || {}).thinking || ''`);
+  ok('with Thinking off, no reasoning block is produced', offRole === 'assistant' && offThinking === '',
+    'role: ' + offRole + ' thinking: ' + JSON.stringify(offThinking));
   await ev(`document.querySelector('#thinkToggle').click(); 1`);
 
   // ---- edit with branching ------------------------------------------------

@@ -121,13 +121,34 @@ async function launch(url, port, { extraArgs = [], width = 1400, height = 800, p
       const node = (await cmd('DOM.querySelector', { nodeId: doc, selector })).result.nodeId;
       await cmd('DOM.setFileInputFiles', { nodeId: node, files });
     },
-    // send a message through the app and wait for the reply to finish
+    // Wait for a turn to end. The model may ask to use a skill (the starter skills are
+    // in the system prompt): the approval card is answered like a user would answer it
+    // (Allow once), and the turn goes on. Returns true when the app is idle again.
+    finishTurn: async (ms = 180000) => {
+      const end = Date.now() + ms;
+      let idle = 0;
+      while (Date.now() < end) {
+        if (await ev(`!!document.querySelector('.toolcall.awaiting')`)) {
+          idle = 0;
+          await ev(`document.querySelector('.toolcall.awaiting [data-tc=once]').click(); 1`);
+          await sleep(600);
+          continue;
+        }
+        if (await ev(`!state.streaming && !state.toolsBusy`)) { if (++idle >= 4) return true; } else idle = 0;
+        await sleep(250);
+      }
+      return false;
+    },
+    // send a message through the app and wait for the reply to finish.
+    // The reply of the assistant is waited for: the message of the user is never the
+    // answer, and a message that only holds a tool call is not the answer either.
     ask: async (q, ms = 180000) => {
       const before = await ev('state.chat.messages.length');
       await ev(`send(${JSON.stringify(q)}); 1`);
       await sleep(600);
-      await h.waitFor(`!state.streaming && state.chat.messages.length >= ${before + 2}`, ms);
-      await sleep(800);
+      await h.finishTurn(ms);
+      await h.waitFor(`state.chat.messages.length > ${before} && (state.chat.messages.at(-1) || {}).role === 'assistant' && !!((state.chat.messages.at(-1) || {}).content || '').trim()`, ms);
+      await sleep(500);
       return ev('state.chat.messages.at(-1).content');
     },
     // real keyboard event with modifiers (ctrl=2, meta=4, shift=8)

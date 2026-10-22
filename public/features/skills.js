@@ -140,6 +140,14 @@ $('#skFileInput').onchange = async (e) => {
 };
 
 // ---- a new skill and a zip that is uploaded ----------------------------------
+// The warning before an upload replaces a skill that is already there: the old files
+// are removed, so the user has to know it.
+function skillReplaceWarning(name) {
+  const old = (state.skills || []).find((s) => s.name === name);
+  if (!old) return '';
+  const files = (old.files || []).length;
+  return `There is already a skill called "${old.name}". This upload replaces it: its ${files} file${files === 1 ? '' : 's'} (${kbLabel(old.size || 0)}) are removed and the bundle takes their place. Continue?`;
+}
 $('#skillNew').onclick = async () => {
   const name = prompt('The name of the new skill (a-z, 0-9, "-" and "_", at most 40 characters):');
   if (!name) return;
@@ -158,6 +166,8 @@ $('#skillZipInput').onchange = async (e) => {
   const guess = f.name.replace(/\.zip$/i, '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 40);
   const name = prompt('The name of the skill in this zip:', guess);
   if (!name) return;
+  const warn = skillReplaceWarning(name.trim());
+  if (warn && !confirm(warn)) return; // the skill of the user stays as it is
   try {
     const data = (await fileToDataURL(f)).split(',')[1];
     await api('/skills/upload', { method: 'POST', body: { name: name.trim(), file: data } });

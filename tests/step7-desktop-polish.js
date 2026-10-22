@@ -113,7 +113,7 @@ const FAKE_SPEECH = `
   ok('enabling adds a built-in "Web" server with fetch_page only', (await ev(`JSON.stringify(state.mcp.find(s => s.id === 'builtin').tools.map(t => t.name))`)) === '["fetch_page"]');
   ok('built-in row has no remove/toggle buttons', (await ev(`document.querySelector('#mcpList .mcp [data-a=rm]')`)) === null);
   await ev(`(() => { webProv.value = 'searxng'; webProv.dispatchEvent(new Event('change')); webUrl.value = 'http://127.0.0.1:3197'; document.querySelector('#webSave').click(); })(); 1`); await sleep(900);
-  ok('configuring SearXNG adds web_search', (await ev(`JSON.stringify(state.mcp.find(s => s.builtin).tools.map(t => t.name))`)) === '["web_search","fetch_page"]');
+  ok('configuring SearXNG adds web_search', (await ev(`JSON.stringify(state.mcp.find(s => s.id === 'builtin').tools.map(t => t.name))`)) === '["web_search","fetch_page"]');
   const sr = JSON.parse(await probe('web_search', { query: 'zebra handbook' }));
   ok('web_search returns formatted results', !sr.isError && /1\. Lumen Zebra Handbook\n\s+https:\/\/example\.org\/zebra/.test(sr.text), sr.text.slice(0, 60).replace(/\n/g, ' '));
   ok('query + json format reached SearXNG', require('fs').readFileSync(require('path').join(require('./lib/cdplib').T, 'searx-last-query.txt'), 'utf8') === 'zebra handbook|json');
