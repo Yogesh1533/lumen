@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "app": "node bin/lumen-app.js"
+    "app": "node bin/lumen-app.js",
+    "test": "tests/run.sh"
   },
   "engines": {
     "node": ">=18"

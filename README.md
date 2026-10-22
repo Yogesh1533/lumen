@@ -54,3 +54,8 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 - Artifact previews are sandboxed with an opaque origin and cannot reach the API or your chats.
 - Web pages and search results are untrusted text that the model will read. Keep tool approval on, and be wary of approving other tools right after a model has read a page you don't trust. A Brave API key is stored in plain text in `data/settings.json` (never sent back to the browser).
 - Dictation is not local: see above.
+
+## Development
+
+- Tests: `npm test` (or `tests/run.sh 1 5`) drives a throwaway server in Chrome over CDP. Pin a local model with `LUMEN_TEST_MODEL=gemma4:latest` so test prompts stay off cloud models.
+- Roadmap and handoff notes for continuing the project: [docs/ROADMAP.md](docs/ROADMAP.md).
