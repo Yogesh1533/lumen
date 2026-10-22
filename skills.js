@@ -91,11 +91,15 @@ function safeInside(root, dir, rel) {
   if (!realBase) throw new Error('There is no skill called "' + path.basename(base) + '"');
   if (!insideRoot(root, realBase)) throw new Error('That path would leave the folder of the skills');
   let cur = base;
-  for (const part of rel.split('/')) {
-    cur = path.join(cur, part);
+  const parts = rel.split('/');
+  for (let i = 0; i < parts.length; i++) {
+    cur = path.join(cur, parts[i]);
     let st = null;
     try { st = fs.lstatSync(cur); } catch { st = null; } // the last part may be new
     if (st && st.isSymbolicLink()) throw new Error('A symlink is not used');
+    // A folder on the way that is not a folder: the path cannot be the path of a
+    // file. It is refused here, and not by a crash of the file system further on.
+    if (st && i < parts.length - 1 && !st.isDirectory()) throw new Error('That path is not a folder');
   }
   let real = null;
   try { real = fs.realpathSync(cur); } catch { real = null; }
@@ -327,6 +331,11 @@ function addFile(root, settings, name, relPath, buf) {
   const rel = safeRel(relPath);
   if (!rel) throw new Error('That is not a valid path inside a skill');
   const { target } = safeInside(root, dir, rel);
+  // A folder is not a file: the write is refused here, and not by a crash of the
+  // file system further on.
+  let tst = null;
+  try { tst = fs.lstatSync(target); } catch { tst = null; }
+  if (tst && tst.isDirectory()) throw new Error('That path is a folder, not a file');
   const current = folderSize(walk(dir));
   if (current + buf.length > MAX_BYTES) throw new Error('The skill would be bigger than the limit of 30 MB (' + MAX_BYTES + ' bytes)');
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -431,12 +440,41 @@ function ensureStarters(root, settings) {
     fs.mkdirSync(dir, { recursive: true });
     // The folder that was made is proved again before the starter is copied into it.
     try { skillFolder(root, name); } catch { continue; }
+    // The source of the copy is ours; the target is not. It is proved like every
+    // other write of a skill: a symlink in the way is refused, and the real path of
+    // the target must stay inside the real root of the skills. The SKILL.md decides:
+    // when its target cannot be proved the whole starter is refused, because a
+    // folder without a SKILL.md is not a skill. Every other file is refused on its
+    // own, and the rest of the starter is installed.
+    let mdTarget;
+    try { mdTarget = safeInside(root, dir, 'SKILL.md').target; }
+    catch { continue; }
+    try {
+      fs.mkdirSync(path.dirname(mdTarget), { recursive: true });
+      fs.copyFileSync(path.join(src, 'SKILL.md'), mdTarget);
+    } catch { continue; }
     for (const f of walk(src)) {
-      const target = path.join(dir, ...f.path.split('/'));
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(path.join(src, ...f.path.split('/')), target);
+      if (f.path === 'SKILL.md') continue;
+      let target;
+      try { target = safeInside(root, dir, f.path).target; }
+      catch { continue; }
+      try {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(path.join(src, ...f.path.split('/')), target);
+      } catch { /* the file could not be written; the rest of the starter is installed */ }
     }
   }
+}
+// A leftover of the disk is removed. A symlink is removed as a link: the folder it
+// points at is never touched.
+function removeLeftover(p) {
+  let st = null;
+  try { st = fs.lstatSync(p); } catch { return; }
+  if (st.isSymbolicLink()) {
+    try { fs.unlinkSync(p); } catch { /* nothing to clean */ }
+    return;
+  }
+  try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* nothing to clean */ }
 }
 // The leftovers of an upload that a crash left behind are swept away at the start: the
 // staging folder of a bundle, and the backup folder of a skill that was replaced. If
@@ -447,7 +485,7 @@ function sweepStaging(root, settings) {
   try { names = fs.readdirSync(root); } catch { return; }
   for (const n of names) {
     if (n.startsWith('.staging-')) {
-      try { fs.rmSync(path.join(root, n), { recursive: true, force: true }); } catch { /* nothing to clean */ }
+      removeLeftover(path.join(root, n));
       continue;
     }
     // The backup of a replaced skill: "<name>.old-<uuid>".
@@ -455,14 +493,28 @@ function sweepStaging(root, settings) {
     if (!m) continue;
     const name = m[1];
     const dir = path.join(root, name);
+    const backup = path.join(root, n);
     let st = null;
     try { st = fs.lstatSync(dir); } catch { st = null; }
     if (st || (settings && isRemoved(settings, name))) {
       // The skill is there (or the user deleted it): the backup is a leftover and goes.
-      try { fs.rmSync(path.join(root, n), { recursive: true, force: true }); } catch { /* nothing to clean */ }
+      removeLeftover(backup);
     } else {
-      // The skill is not there: the backup is the skill, and it is put back.
-      try { fs.renameSync(path.join(root, n), dir); } catch { /* it stays where it is */ }
+      // The skill is not there: the backup is the skill, and it is put back. A backup
+      // that is a symlink is not a skill: it is not put back under a skill name, and
+      // the folder outside is never touched. The link itself is removed.
+      let bst = null;
+      try { bst = fs.lstatSync(backup); } catch { bst = null; }
+      if (!bst || bst.isSymbolicLink() || !bst.isDirectory()) {
+        removeLeftover(backup);
+        continue;
+      }
+      try { fs.renameSync(backup, dir); } catch { continue; }
+      // The folder that was put back is proved like every other folder of a skill:
+      // it must be a real folder inside the real root of the skills. If it is not,
+      // the backup goes back to where it was.
+      try { skillFolder(root, name); }
+      catch { try { fs.renameSync(dir, backup); } catch { /* it stays where it is */ } }
     }
   }
 }

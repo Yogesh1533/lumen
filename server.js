@@ -473,7 +473,10 @@ async function api(req, res, url) {
   // files of its own. The folders live in data/skills/<name>/; the model only reads them.
   if (parts[0] === 'skills') {
     const sub = parts[1] || '';
-    const name = sub ? decodeURIComponent(sub) : '';
+    // A name that is not a name (a broken escape) is refused with a 400, not a 500.
+    let name = '';
+    try { name = sub ? decodeURIComponent(sub) : ''; }
+    catch { return send(res, 400, { error: 'That name is not a skill name' }); }
     // The list of the skills and the limits that apply to them.
     if (!sub && m === 'GET') {
       return send(res, 200, { skills: skills.list(SKILLS_DIR, settings), limits: { maxBytes: skills.MAX_BYTES } });

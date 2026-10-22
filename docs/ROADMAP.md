@@ -292,7 +292,10 @@ Handoff notes:
   project: the invariant of section 2 covers the **memory** only, and a skill is not memory.
 - **The starter skills** are copied into `data/skills/` on the first run and are **never overwritten** (the user may have edited them). A starter that the user
   **deleted** stays deleted: the name keeps a tombstone in the settings (`settings.skills[name].removed = true`, and `enabled = false`), `ensureStarters()` skips it
-  and the list of the skills does not show it. A new skill with the same name clears the tombstone.
+  and the list of the skills does not show it. A new skill with the same name clears the tombstone. The **copy** is proved like every other write of a skill: the
+  target of every starter file is held against the real path of `data/skills/` and every segment of it is checked. A starter file whose target is a symlink is
+  **refused on its own** (it is not written through the symlink) and the rest of the starter is still installed; when the `SKILL.md` itself cannot be proved, the
+  whole starter is refused, because a folder without a `SKILL.md` is not a skill.
 - **The skills server appears only while a skill is switched on** (like the web server, which appears when the web tools are on). With every skill off, Lumen sends
   no skills tool to the model at all and the server is not in the list of the servers.
 - **The built-in Skills server changes what the earlier steps' tests see.** It is in the list of the servers (`GET /api/mcp`) **while at least one skill is
@@ -353,6 +356,19 @@ Handoff notes:
 - **A Temporary chat still sends the enabled skills to the model**, the same way it sends the files of a project. The invariant of section 2 covers the
   **memory** only, and a skill is not memory. The sentence is in `README.md` (the skills bullet) and in the step-10 notes above.
 - The sentence "it is always in the list of the servers" was wrong (the Skills server is hidden while no skill is on) and now agrees with the code.
+
+**Fix round 3** (the re-review of the fix round 2; the changes are in the commit after `ed5f412`):
+
+- **The copy of a starter is proved like every other write of a skill** (`ensureStarters()` in `skills.js`). The source of the copy is ours (`starter-skills/`), the
+  target is not: the target of every starter file is now held against the real path of `data/skills/` with `safeInside()`, so every segment of it is checked and a
+  symlink in the way is refused. **A starter file whose target is a symlink is refused on its own** (it is not written through the symlink) and the rest of the
+  starter is still installed; when the `SKILL.md` itself cannot be proved, the **whole starter is refused**, because a folder without a `SKILL.md` is not a skill.
+- **The sweep only puts back a folder that is a skill** (`sweepStaging()`): a backup `<name>.old-<uuid>` that is a symlink (or that is not a real folder) is **not
+  restored — it is deleted as a link**, and the folder it points at is never touched. A backup that is put back is proved with `skillFolder()` first: it must be a
+  real folder inside the real path of `data/skills/`, or the name is put back as it was and nothing is restored.
+- **A refusal is a refusal, not a crash of the file system.** `safeInside()` refuses a path whose folder on the way is not a folder ("That path is not a folder"),
+  and `addFile()` refuses a target that is a folder ("That path is a folder, not a file"), instead of letting the file system answer with `EEXIST` or `EISDIR`.
+- **A name that is not a name is a 400** (`server.js`): a broken escape in the URL (`/api/skills/%`) is refused with a message, not with a 500.
 
 ### Step 11: Side Chat and Split View
 - **Side Chat:** right panel with its own thread seeded with a snapshot of the main conversation ("answer briefly; this is a side question"); never modifies the main chat;

@@ -6,6 +6,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const net = require('net');
 const { zip } = require('./lib/zipwrite');
 // The skills of the server are also called directly, where the server has no route for
 // them (the starter skills are installed when the server starts).
@@ -44,8 +45,24 @@ async function call(method, url, body, headers = {}) {
   try { json = JSON.parse(text); } catch { /* not json */ }
   return { status: r.status, json, text };
 }
+// Is something still listening on this port?
+function portBusy(port) {
+  return new Promise((resolve) => {
+    const s = net.connect({ port, host: '127.0.0.1' });
+    s.on('connect', () => { s.destroy(); resolve(true); });
+    s.on('error', () => resolve(false));
+  });
+}
 // A second Lumen with the same data folder: this is the code path of a restart.
 async function startServer(port) {
+  // The port must be free before the new server starts. A server of the last step that
+  // is still shutting down would answer the poll below, and the new server would die
+  // of "address in use" without ever running its own start-up (the sweep of the
+  // leftovers of an upload). The test would then measure the old server.
+  for (let i = 0; i < 100; i++) {
+    if (!(await portBusy(port))) break;
+    await sleep(100);
+  }
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
     env: { ...process.env, PORT: String(port), LUMEN_DATA: DATA_FILE },
     stdio: 'ignore',
@@ -748,6 +765,89 @@ const MODEL_SYS = [
     ok('the skill that was put back is a skill of the user', restored.status === 200 && /RESTORED/.test((restored.json || {}).content || ''),
       restored.text.slice(0, 200));
     s3.stop();
+  }
+
+  // ---- 24. the copy of a starter is proved like every other write --------------
+  // The source of the copy is ours (starter-skills/); the target is not: a symlink
+  // inside the folder of the skill must never be written through.
+  {
+    const copyRoot = path.join(TMP, 'starter-copy-root');
+    const copyOutside = path.join(TMP, 'outside-copy');
+    fs.rmSync(copyRoot, { recursive: true, force: true });
+    fs.rmSync(copyOutside, { recursive: true, force: true });
+    fs.mkdirSync(copyRoot, { recursive: true });
+    fs.mkdirSync(copyOutside, { recursive: true });
+    fs.writeFileSync(path.join(copyOutside, 'evil.txt'), 'ORIGINAL OUTSIDE\n');
+    // A skill folder with a symlink inside it: a file outside.
+    fs.mkdirSync(path.join(copyRoot, 'summarise'), { recursive: true });
+    fs.symlinkSync(path.join(copyOutside, 'evil.txt'), path.join(copyRoot, 'summarise', 'checklist.md'));
+    skillsModule.ensureStarters(copyRoot, { skills: {} });
+    ok('the outside file is not written through the symlink',
+      fs.readFileSync(path.join(copyOutside, 'evil.txt'), 'utf8') === 'ORIGINAL OUTSIDE\n',
+      fs.readFileSync(path.join(copyOutside, 'evil.txt'), 'utf8').slice(0, 80));
+    ok('the rest of the starter is installed', fs.existsSync(path.join(copyRoot, 'summarise', 'SKILL.md')),
+      fs.readdirSync(path.join(copyRoot, 'summarise')).join(','));
+    ok('the symlink inside the skill is still a symlink',
+      fs.lstatSync(path.join(copyRoot, 'summarise', 'checklist.md')).isSymbolicLink());
+
+    // A broken symlink inside the skill folder: the file must not be created outside.
+    const brokenRoot = path.join(TMP, 'starter-broken-root');
+    fs.rmSync(brokenRoot, { recursive: true, force: true });
+    fs.mkdirSync(brokenRoot, { recursive: true });
+    fs.mkdirSync(path.join(brokenRoot, 'summarise'), { recursive: true });
+    fs.symlinkSync(path.join(copyOutside, 'created.txt'), path.join(brokenRoot, 'summarise', 'checklist.md'));
+    skillsModule.ensureStarters(brokenRoot, { skills: {} });
+    ok('no file is created outside the skills', !fs.existsSync(path.join(copyOutside, 'created.txt')),
+      fs.readdirSync(copyOutside).join(','));
+
+    // The normal case: the starters are installed with their files.
+    const plainRoot = path.join(TMP, 'starter-plain-root');
+    fs.rmSync(plainRoot, { recursive: true, force: true });
+    skillsModule.ensureStarters(plainRoot, { skills: {} });
+    ok('the starter skills are installed', fs.existsSync(path.join(plainRoot, 'summarise', 'SKILL.md')) &&
+      fs.existsSync(path.join(plainRoot, 'explain', 'SKILL.md')),
+      fs.existsSync(plainRoot) ? fs.readdirSync(plainRoot).join(',') : 'no folder');
+    ok('a starter keeps its own files', fs.existsSync(path.join(plainRoot, 'summarise', 'checklist.md')),
+      fs.existsSync(path.join(plainRoot, 'summarise')) ? fs.readdirSync(path.join(plainRoot, 'summarise')).join(',') : 'no folder');
+  }
+
+  // ---- 25. a backup that is a symlink is not a skill ---------------------------
+  {
+    const outside2 = path.join(TMP, 'outside-backup');
+    fs.rmSync(outside2, { recursive: true, force: true });
+    fs.mkdirSync(outside2, { recursive: true });
+    fs.writeFileSync(path.join(outside2, 'keep.txt'), 'DO NOT TOUCH');
+    const backupLink = path.join(SKILLS_DIR, 'sweep-link.old-11111111-2222-3333-4444-777777777777');
+    try { fs.unlinkSync(backupLink); } catch { /* not there */ }
+    fs.symlinkSync(outside2, backupLink, 'dir');
+
+    const s4 = await startServer(3196);
+    ok('the server starts again', s4.ok, 'the second server did not come up');
+    ok('a backup that is a symlink is not restored', !fs.existsSync(path.join(SKILLS_DIR, 'sweep-link')),
+      fs.readdirSync(SKILLS_DIR).join(','));
+    ok('the folder outside is not touched', fs.existsSync(path.join(outside2, 'keep.txt')) &&
+      fs.readFileSync(path.join(outside2, 'keep.txt'), 'utf8') === 'DO NOT TOUCH',
+      fs.readdirSync(outside2).join(','));
+    ok('the symlink of the backup is gone', !fs.existsSync(backupLink), fs.readdirSync(SKILLS_DIR).join(','));
+    s4.stop();
+  }
+
+  // ---- 26. a refusal says what is wrong ---------------------------------------
+  {
+    // A file in the way of a folder: the path is not a path of a file at all.
+    const made = await call('POST', '/api/skills', { name: 'midfile', content: '---\nname: midfile\ndescription: A skill with a file in the way.\n---\n' });
+    ok('the skill for the refusal exists', made.status === 200, made.text.slice(0, 160));
+    const plain = await call('POST', '/api/skills/midfile/files', { path: 'plain', data: Buffer.from('I am a file').toString('base64') });
+    ok('the file in the way can be added', plain.status === 200, plain.text.slice(0, 160));
+    const bad = await call('POST', '/api/skills/midfile/files', { path: 'plain/x.md', data: Buffer.from('gotcha').toString('base64') });
+    ok('a path through a file is refused', bad.status === 400, bad.text.slice(0, 200));
+    ok('the refusal says what is wrong', /folder/i.test(bad.text) && !/EEXIST/.test(bad.text), bad.text.slice(0, 200));
+    ok('nothing was written through the file', !fs.existsSync(path.join(SKILLS_DIR, 'midfile', 'plain', 'x.md')));
+
+    // A name that is not a name: a malformed escape in the URL is a 400, not a 500.
+    const badUrl = await call('GET', '/api/skills/%');
+    ok('a malformed name in the URL is refused with a 400', badUrl.status === 400, badUrl.text.slice(0, 200));
+    ok('the refusal of a malformed name has a message', /name/i.test(badUrl.text), badUrl.text.slice(0, 200));
   }
 
   h.close();
