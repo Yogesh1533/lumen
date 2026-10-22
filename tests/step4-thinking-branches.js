@@ -5,7 +5,9 @@ const { launch, sleep } = require('./lib/cdplib');
 
   // ---- thinking block ----------------------------------------------------
   ok('thinking toggle visible for a reasoning model', !(await ev(`document.querySelector('#thinkWrap').hidden`)));
-  await ev(`send('Why is the sky blue? Answer in one short sentence.'); 1`);
+  // NB: a "one short sentence" prompt makes gemma4 skip its reasoning half the time (empty
+  // `thinking` from Ollama even with think:true), so ask for a step-by-step explanation.
+  await ev(`send('Explain step by step why the sky appears blue.'); 1`);
   let sawLive = false;
   for (let i = 0; i < 240 && !sawLive; i++) { await sleep(250); sawLive = await ev(`!!document.querySelector('details.think.live[open]')`); if (await ev('!state.streaming && state.chat.messages.length >= 2')) break; }
   ok('thinking block is open + live while the model thinks', sawLive);
@@ -18,7 +20,7 @@ const { launch, sleep } = require('./lib/cdplib');
   await shot('step4-thought');
 
   // ---- auto title ---------------------------------------------------------
-  const prefix = 'Why is the sky blue? Answer in one short sentence.';
+  const prefix = 'Explain step by step why the sky appears blue.';
   ok('auto title replaces the message-prefix title', await waitFor(`state.chat.titled === true && state.chat.title !== ${JSON.stringify(prefix)}`, 60000), `"${prefix}" -> "${await ev('state.chat.title')}"`);
   const t = await ev('state.chat.title');
   ok('auto title is short', t.length > 0 && t.length <= 60 && t.split(/\s+/).length <= 10, t);

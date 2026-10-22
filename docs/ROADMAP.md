@@ -9,7 +9,11 @@ Steps 1 to 7 are built, tested and merged (PRs #1 to #7):
 attachments and vision, artifacts, projects, thinking and branching and auto titles, styles and memory,
 MCP tools with approval, command palette and shortcuts and dictation and web tools and installable app.
 
-**Next: steps 8 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 8 (quick wins) is built, tested and committed on branch `step-8-quickwins` (not merged yet):
+token usage and a usage dialog, read aloud, find in conversation, Markdown export, chat tabs,
+try another model and side-by-side compare, and a troubleshooting dialog with a diagnostic report.
+
+**Next: steps 9 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -19,6 +23,7 @@ MCP tools with approval, command palette and shortcuts and dictation and web too
 | `mcp.js` | MCP client manager (stdio + Streamable HTTP) on `@modelcontextprotocol/sdk` |
 | `webtools.js` | Built-in `fetch_page` / `web_search` with SSRF protection |
 | `public/app.js` | The whole single-page UI (vanilla JS, no build step) |
+| `public/features/quickwins.js` | Step-8 UI (usage, read aloud, find, export, tabs, compare, troubleshooting); a classic script loaded after `app.js`, sharing its global scope |
 | `public/index.html`, `style.css` | Markup and styles |
 | `bin/lumen-app.js` | Opens Lumen in a Chrome/Edge app window |
 | `tests/` | Browser tests driven over CDP (see section 6) |
@@ -46,10 +51,16 @@ Run: `npm start` (port 3100) or `npm run app`. Node 22+. Ollama at `http://127.0
 ### Gotchas already learned
 - Ollama silently drops the *start* of an over-long prompt (the system prompt). `settings()` raises `num_ctx` automatically (4k to 32k).
 - Reasoning models stream `message.thinking`; pass `think:false` for fast deterministic tests and titles.
+- `gemma4` sometimes answers with an **empty** `thinking` even when the request says `think:true` — with a "answer in one short sentence" prompt
+  that happened in about half the runs (checked straight against `curl http://127.0.0.1:11434/api/chat`, so it is the model, not Lumen).
+  Tests that need a reasoning block should use a "explain step by step" prompt.
 - Ollama streams `message.tool_calls`; tool names are namespaced `server__tool` (<= 64 chars).
 - Chrome puts sandboxed iframes in a separate process that headless CDP cannot drive; tests launch Chrome with
   `--disable-features=IsolateSandboxedIframes` to click inside artifacts. The sandbox attribute is what is verified.
 - Tests must override `window.confirm`; the app uses native `confirm`/`prompt` in places.
+- A leftover headless Chrome from a crashed test run keeps the CDP debug port **and its old profile**, so the next run silently drives the stale
+  page (it failed step 4 that way: the old profile had thinking switched off). `tests/lib/cdplib.js` now stops whatever listens on the debug port
+  before starting a fresh browser, and kills the browser when the test process exits.
 - This repo may be worked on from a git worktree. Do not run git in a different checkout than the session is bound to.
 
 ## 3. Models
@@ -109,6 +120,19 @@ For every step: branch, build, add `tests/stepN-*.js`, run `tests/run.sh`, updat
 - **Retry with another model / Compare:** regenerate menu with a model chooser (uses the existing fork mechanism); Compare dialog streaming two models side by side with "Keep this one".
 - **Troubleshooting:** Settings > Troubleshooting with server log view, diagnostic report (versions, Ollama reachability, model list, no chat content), data folder path.
 - Tests: usage numbers stored; `speechSynthesis` mocked; find counts; export content; tab behaviours; model-switch regenerate creates a fork with a different model.
+
+**Done** on branch `step-8-quickwins` (tests: `tests/step8-quickwins.js`, 47 assertions, `tests/run.sh 8`).
+Handoff notes:
+- The step-8 UI lives in `public/features/quickwins.js`, a classic script loaded after `app.js`; it uses the new `hooks` object in `app.js`
+  (`onRender`, `onMsgAction`, `onOpenChat`, `onNewChat`, `onReply`) so `app.js` stays untouched. Later steps can add their own `public/features/*.js` the same way.
+- `app.js` now stores the final Ollama chunk counters on each assistant message (`message.stats`) plus `message.model` and `message.t`; `PUT /api/chats/:id`
+  copies the whole `messages` array, so those fields are saved without a schema change. `GET /api/usage` aggregates them per model and per local day.
+- `generate(fork, model)` takes an optional model, so "try another model" reuses the existing fork mechanism and the old answer stays as another version.
+- New API routes (`/api/usage`, `/api/logs`, `/api/diagnostics`) sit inside `api()` and are therefore behind `guard()`. The diagnostic report and the log view
+  contain no chat content (asserted in the tests).
+- Preferences (auto-read, voice, continue-last-chat, open tabs) live in `localStorage` via `pref()`; the server `settings` schema is untouched.
+- Not covered by the tests: real speech (the tests mock `speechSynthesis`), the print-to-PDF result (only the print stylesheet is asserted),
+  and the real clipboard in browsers that block it (the test grants the permission).
 
 ### Step 9: import from Claude Desktop
 - Detect the Claude config path per OS (macOS above; Windows `%APPDATA%\Claude`; Linux `~/.config/Claude`). Read-only parse of `mcpServers` (`command`, `args[]`, `env{}`).

@@ -268,3 +268,71 @@ kbd { font: 12px ui-monospace, Menlo, monospace; background: var(--panel2); bord
 #micBtn[hidden] { display: none; }
 #webCfg[hidden], #webUrl[hidden], #webKey[hidden] { display: none; }
 #webProv { width: 100%; max-width: none; }
+
+/* step 8: usage stats */
+#usageDlg { max-height: calc(100vh - 48px); overflow-y: auto; }
+#usageDlg h3 { margin: 18px 0 8px; font-size: 14px; }
+.usage-totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.ustat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+.ustat b { display: block; font-size: 17px; }
+.ustat span { font-size: 11px; color: var(--muted); }
+.utable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.utable th, .utable td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+.utable th { color: var(--muted); font-weight: 600; font-size: 12px; }
+.cloudmark { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; white-space: nowrap; }
+
+/* step 8: find in conversation */
+.findbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.findbar[hidden] { display: none; }
+.findbar input { flex: 1; max-width: 420px; }
+.findbar span { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+mark.find-hit { background: #ffe27a; color: #1b1b24; border-radius: 3px; padding: 0 1px; }
+mark.find-hit.cur { background: #ff9d2e; }
+
+/* step 8: chat tabs */
+.tabstrip { display: flex; align-items: center; gap: 6px; padding: 6px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.tabstrip[hidden] { display: none; }
+.tablist { display: flex; gap: 4px; overflow-x: auto; flex: 1; }
+.tab { display: flex; align-items: center; gap: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 3px 4px 3px 10px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.tab .t { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.tab button { padding: 0 6px; color: var(--muted); }
+.tab.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.tab.on button { color: var(--accent-fg); }
+
+/* step 8: try another model + compare */
+.modellist { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.modellist button { text-align: left; }
+#compareDlg { max-width: min(980px, calc(100vw - 32px)); }
+.cmp-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cmp-row select { max-width: 240px; }
+.cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+@media (max-width: 760px) { .cmp-grid { grid-template-columns: 1fr; } }
+.cmp-col { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; min-width: 0; }
+.cmp-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.cmp-head span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-out { white-space: pre-wrap; word-break: break-word; max-height: 46vh; overflow-y: auto; font-size: 14px; }
+
+/* step 8: troubleshooting */
+#troubleDlg { max-width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+#troubleDlg h3 { margin: 18px 0 8px; font-size: 14px; }
+.diagbox { display: flex; flex-direction: column; gap: 4px; }
+.diagrow { display: flex; gap: 10px; font-size: 13px; border-bottom: 1px solid var(--border); padding: 3px 0; }
+.diagrow span { width: 110px; flex: none; color: var(--muted); }
+.diagrow b { font-weight: 600; word-break: break-all; }
+.logbox { background: var(--code); color: var(--code-fg); border-radius: 10px; padding: 10px 12px; max-height: 240px; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+
+/* step 8: export */
+#exportDlg { max-width: min(760px, calc(100vw - 32px)); }
+#exportDlg label.check { flex-direction: row; align-items: center; gap: 8px; }
+.exppreview { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; max-height: 46vh; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+
+/* print: the conversation only — the browser can save it as a PDF */
+@media print {
+  #sidebar, #controls, #artifact, header, .findbar, #composer, #welcome, #toast, dialog, .msg .tools, .msg .vers { display: none !important; }
+  html, body, #app, main { height: auto; overflow: visible; background: #fff; color: #000; }
+  #messages { overflow: visible; padding: 0; }
+  .msg { max-width: none; break-inside: avoid; }
+  .msg .avatar { display: none; }
+  .msg.user .content { background: #f2f2f2; }
+  a { color: #000; }
+}

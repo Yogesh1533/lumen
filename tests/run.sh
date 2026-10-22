@@ -21,10 +21,10 @@ name_of() {
   case "$1" in
     1) echo step1-attachments ;;     2) echo step2-artifacts ;;      3) echo step3-projects ;;
     4) echo step4-thinking-branches ;; 5) echo step5-styles-memory ;; 6) echo step6-mcp-tools ;;
-    7) echo step7-desktop-polish ;;  *) echo "" ;;
+    7) echo step7-desktop-polish ;;  8) echo step8-quickwins ;;  *) echo "" ;;
   esac
 }
-STEPS=("$@"); [ ${#STEPS[@]} -eq 0 ] && STEPS=(1 2 3 4 5 6 7)
+STEPS=("$@"); [ ${#STEPS[@]} -eq 0 ] && STEPS=(1 2 3 4 5 6 7 8)
 FAILED=()
 for n in "${STEPS[@]}"; do
   f="$(name_of "$n")"; [ -z "$f" ] && { echo "unknown step $n"; FAILED+=("$n"); continue; }

@@ -1,5 +1,5 @@
 // Tiny CDP harness: launch headless Chrome, evaluate JS, screenshot, upload files.
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -9,10 +9,25 @@ fs.mkdirSync(T, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
 
+// The PID(s) listening on a TCP port (the browser that owns the debug port, nothing else).
+// Needs lsof; without it the list is empty and the run just uses the port as it finds it.
+function listenerPids(port) {
+  try {
+    return execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN -t`, { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString().split('\n').map((s) => s.trim()).filter(Boolean).map(Number);
+  } catch { return []; }
+}
+
 async function launch(url, port, { extraArgs = [], width = 1400, height = 800, preScript = '' } = {}) {
+  // A browser left over from an earlier run would keep the debug port and its old profile
+  // (localStorage!), so the test would drive the stale page instead of the fresh one.
+  for (const pid of listenerPids(port)) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
+  await sleep(300);
   fs.rmSync(`${T}/chrome-prof-${port}`, { recursive: true, force: true }); // fresh profile every run
   const chrome = spawn((process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
     ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${T}/chrome-prof-${port}`, `--window-size=${width},${height}`, ...extraArgs, 'about:blank'], { stdio: 'ignore' });
+  const killChrome = () => { try { chrome.kill(); } catch { /* already gone */ } };
+  process.on('exit', killChrome); // a crashed test must not leave the browser behind
   let targets;
   for (let i = 0; i < 40; i++) { try { targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); if (targets.find((t) => t.type === 'page')) break; } catch {} await sleep(250); }
   const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);

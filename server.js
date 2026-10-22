@@ -28,6 +28,17 @@ const SETTINGS_FILE = path.join(path.dirname(DATA_FILE), 'settings.json');
 let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [], web: { enabled: false, provider: '', searxngUrl: '', braveKey: '' } };
 try { const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); settings = { ...settings, ...saved, web: { ...settings.web, ...(saved.web || {}) } }; } catch { /* first run */ }
 const timers = new Map();
+// A small ring buffer of the server's own log lines, shown in Settings > Troubleshooting.
+const LOG_MAX = 300;
+const logs = [];
+function logPush(level, args) {
+  logs.push({ t: Date.now(), level, msg: args.map((a) => (typeof a === 'string' ? a : String(a))).join(' ').slice(0, 2000) });
+  if (logs.length > LOG_MAX) logs.shift();
+}
+for (const level of ['log', 'warn', 'error']) {
+  const orig = console[level].bind(console);
+  console[level] = (...args) => { logPush(level, args); orig(...args); };
+}
 function write(file, obj) {
   clearTimeout(timers.get(file));
   timers.set(file, setTimeout(() => {
@@ -61,6 +72,11 @@ async function capabilities(name) {
 }
 
 // ---- helpers -------------------------------------------------------------
+// Local calendar day (YYYY-MM-DD) for a timestamp.
+function dayKey(t) {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 function send(res, code, body) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
@@ -107,11 +123,71 @@ async function api(req, res, url) {
       const models = await Promise.all((j.models || []).map(async (x) => ({
         id: x.name, size: x.size, family: x.details && x.details.family,
         params: x.details && x.details.parameter_size, caps: await capabilities(x.name),
+        // Ollama cloud models come back with a remote host; they run outside this machine.
+        cloud: !!x.remote_host || /:cloud$/i.test(x.name),
       })));
       return send(res, 200, { models });
     } catch (e) {
+      console.warn(`Cannot reach Ollama at ${OLLAMA}: ${e.message || e}`);
       return send(res, 502, { error: `Cannot reach Ollama at ${OLLAMA}`, models: [] });
     }
+  }
+
+  // Token usage of every assistant message that recorded the final Ollama chunk counters.
+  if (parts[0] === 'usage' && m === 'GET') {
+    const models = new Map();
+    const days = new Map();
+    const totals = { messages: 0, promptTokens: 0, evalTokens: 0, evalMs: 0, totalMs: 0 };
+    const add = (map, key, s) => {
+      let e = map.get(key);
+      if (!e) { e = { promptTokens: 0, evalTokens: 0, evalMs: 0, totalMs: 0, messages: 0 }; map.set(key, e); }
+      e.promptTokens += s.prompt_eval_count || 0;
+      e.evalTokens += s.eval_count || 0;
+      e.evalMs += (s.eval_duration || 0) / 1e6;
+      e.totalMs += (s.total_duration || 0) / 1e6;
+      e.messages += 1;
+    };
+    for (const c of Object.values(chats)) {
+      for (const msg of c.messages || []) {
+        if (!msg || !msg.stats) continue;
+        const model = msg.model || c.model || 'unknown';
+        const day = dayKey(msg.t || c.updated || c.created || Date.now());
+        add(models, model, msg.stats);
+        add(days, day, msg.stats);
+        totals.messages += 1;
+        totals.promptTokens += msg.stats.prompt_eval_count || 0;
+        totals.evalTokens += msg.stats.eval_count || 0;
+        totals.evalMs += (msg.stats.eval_duration || 0) / 1e6;
+        totals.totalMs += (msg.stats.total_duration || 0) / 1e6;
+      }
+    }
+    const rate = (e) => (e.evalMs ? +(e.evalTokens / (e.evalMs / 1000)).toFixed(1) : 0);
+    const byModel = [...models].map(([model, e]) => ({ model, ...e, tokensPerSecond: rate(e) }))
+      .sort((a, b) => b.evalTokens - a.evalTokens);
+    const byDay = [...days].map(([day, e]) => ({ day, ...e, tokensPerSecond: rate(e) })).sort((a, b) => a.day.localeCompare(b.day));
+    return send(res, 200, { totals: { ...totals, tokensPerSecond: rate(totals) }, byModel, byDay });
+  }
+
+  // The server's own log lines (no chat content).
+  if (parts[0] === 'logs' && m === 'GET') {
+    return send(res, 200, { lines: logs });
+  }
+
+  // Diagnostic report for bug reports: versions, paths, Ollama status — never chat content.
+  if (parts[0] === 'diagnostics' && m === 'GET') {
+    let ollama = { url: OLLAMA, reachable: false, models: [] };
+    try {
+      const r = await fetch(`${OLLAMA}/api/tags`);
+      const j = await r.json();
+      ollama = { url: OLLAMA, reachable: true, models: (j.models || []).map((x) => x.name) };
+    } catch { /* Ollama is down — the report says so */ }
+    let messages = 0;
+    for (const c of Object.values(chats)) messages += (c.messages || []).length;
+    return send(res, 200, {
+      app: 'Lumen', version: '1.0.0', node: process.version, platform: `${process.platform} ${process.arch}`,
+      uptimeSec: Math.round(process.uptime()), dataDir: path.dirname(DATA_FILE),
+      ollama, counts: { chats: Object.keys(chats).length, projects: Object.keys(projects).length, messages },
+    });
   }
 
   // Extract text from an uploaded PDF (base64 in JSON).
