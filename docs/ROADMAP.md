@@ -27,6 +27,10 @@ a side chat in a panel of its own (its own chat record, seeded with a bounded sn
 conversation, "Insert into chat" puts the answer into the main chat), a split view whose second pane
 is Lumen itself in an embed mode, and a cross-pane refresh over a BroadcastChannel.
 
+The server stamps the chats with a monotonic clock (`stamp.js`): the stamps are strictly increasing,
+so two chats made in the same millisecond never tie and "continue last chat" always opens the chat
+that was updated last (it used to open the older one of the two).
+
 **Next: steps 12 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation

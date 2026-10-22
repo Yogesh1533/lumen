@@ -108,6 +108,11 @@ async function paneAsk(id, question, ms = 180000) {
   await until(async () => await pBool(id, "(() => { const m = state.chat.messages.at(-1) || {}; return m.role === 'assistant' && !!((m.content||'').trim()); })()"), ms, 300);
   return await pText(id, "((state.chat.messages.at(-1)||{}).content || '')");
 }
+// The window of the app itself: in this test the page is a container of two frames and
+// the app is the first pane. (The step that checks the stamps of the server needs the
+// app of the user, not a pane.)
+const appEval = (expr) => pEval('paneA', expr);
+const appReload = () => pEval('paneA', 'location.reload(); 1');
 
 (async () => {
   const h = await launch(BASE, 9350);
@@ -351,6 +356,38 @@ async function paneAsk(id, question, ms = 180000) {
     ok('a temporary pane saves nothing', cId2 === 'null' || cId2 === 'undefined' || cId2 === '', cId2);
     const chatsAfter = ((await call('GET', '/api/chats')).json || []).length;
     ok('the server has no new chat of the temporary pane', chatsAfter === chatsBefore, `${chatsBefore} -> ${chatsAfter}`);
+  }
+
+  // ---- 11. the stamps of the server are strictly increasing ---------------------
+  {
+    // The clock of the server: 1000 calls in a tight loop must give 1000 strictly
+    // increasing values. With Date.now() they are all the same millisecond — and
+    // "the most recent chat" is then not well defined (the list of the chats is
+    // sorted by the stamp, and a tie leaves the order of the sort to chance).
+    const { nowStamp } = require('../stamp.js');
+    const stamps = [];
+    for (let i = 0; i < 1000; i++) stamps.push(nowStamp());
+    let rising = true;
+    for (let i = 1; i < stamps.length; i++) if (stamps[i] <= stamps[i - 1]) rising = false;
+    ok('the clock of the server is strictly increasing', rising, `${new Set(stamps).size} different values of 1000`);
+
+    // Two chats of the user, one right after the other, with no pause between them:
+    // their stamps must not tie.
+    const mk = async (title) => ((await call('POST', '/api/chats', { title, model: MODEL, system: '', style: '', project: null, messages: [] })).json || {}).id || '';
+    const first = await mk('STAMP ONE');
+    const second = await mk('STAMP TWO');
+    const s1 = (await call('GET', '/api/chats/' + first)).json || {};
+    const s2 = (await call('GET', '/api/chats/' + second)).json || {};
+    ok('the stamps of two chats of the user do not tie', (s2.updated || 0) > (s1.updated || 0), `${s1.updated} -> ${s2.updated}`);
+
+    // The app of the user must open the later chat ("continue last chat").
+    await appEval(`localStorage.setItem('lumen.contLast', '1'); window.__lumenTestMark = 1; 1`);
+    await appReload();
+    // The page must really be the new one: the mark of the old page is gone.
+    await until(async () => String(await appEval(`typeof window.__lumenTestMark`)) === 'undefined', 30000, 250);
+    await until(async () => (await appEval(`!!(state && state.chat && state.chat.id)`)) === true, 30000, 250);
+    const landed = String(await appEval(`state.chat ? state.chat.id : ''`));
+    ok('the app opens the most recent chat of the user', landed === second, `${landed} vs ${second}`);
   }
 
   await shot('step11-side-split');

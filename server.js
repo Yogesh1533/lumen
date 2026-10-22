@@ -8,7 +8,12 @@ const webtools = require('./webtools');
 const claude = require('./claude');
 const zip = require('./zip');
 const skills = require('./skills');
+const { nowStamp } = require('./stamp');
 const mcp = new McpManager();
+// The clock of the server is exported, so that it can be tested directly. The test
+// requires ./stamp.js (the very same function) — requiring this file would start a
+// server, which a test must not do.
+module.exports.nowStamp = nowStamp;
 
 const PORT = process.env.PORT || 3100;
 const OLLAMA = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
@@ -780,7 +785,9 @@ async function api(req, res, url) {
     }
     if (!id && m === 'POST') {
       const b = await readBody(req);
-      const now = Date.now();
+      // The stamps come from the clock of the server: they are strictly increasing,
+      // so two chats made in the same millisecond never tie.
+      const now = nowStamp();
       const c = { id: crypto.randomUUID(), title: b.title || 'New Chat', model: b.model || '',
         system: b.system || '', style: b.style || '', project: projects[b.project] ? b.project : null, pinned: false, created: now, updated: now, messages: b.messages || [] };
       chats[c.id] = c; save();
@@ -797,7 +804,7 @@ async function api(req, res, url) {
       const b = await readBody(req);
       for (const k of ['title', 'model', 'system', 'pinned', 'messages', 'titled', 'style']) if (k in b) chats[id][k] = b[k];
       if ('project' in b) chats[id].project = projects[b.project] ? b.project : null;
-      chats[id].updated = Date.now(); save();
+      chats[id].updated = nowStamp(); save();
       return send(res, 200, summary(chats[id]));
     }
     if (id && m === 'DELETE') { delete chats[id]; save(); return send(res, 200, { ok: true }); }
