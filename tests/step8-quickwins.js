@@ -192,11 +192,18 @@ const FAKE_SPEECH = `
   await ev(`window.fetch = window.__realFetch; 1`);
 
   // ---- the model choosers need a model ------------------------------------------------
+  // The expression must also hold that the dialog is really there: a page that throws
+  // makes ev() answer with a truthy "EXC ..." string, so a missing element has to be
+  // a failure, not a pass.
+  const notOpen = (sel) => `!!document.querySelector('${sel}') && !document.querySelector('${sel}').open`;
   await ev(`window.__savedModels = state.models; state.models = []; 1`);
   await ev(`document.querySelector('#messages .msg.assistant [data-act=regen2]').click(); 1`); await sleep(300);
-  ok('the model chooser does not open when no model is available', await ev(`!document.querySelector('#modelPickDlg').open`));
+  ok('the model chooser does not open when no model is available', await ev(notOpen('#modelPickDlg')));
   await ev(`document.querySelector('#compareBtn').click(); 1`); await sleep(300);
-  ok('the compare dialog does not open when no model is available', await ev(`!document.querySelector('#compareDlg').open`));
+  ok('the compare dialog does not open when no model is available', await ev(notOpen('#compareDlg')));
+  // The check above must not be vacuous: for an element that is not in the page it has
+  // to answer false (and not "the page threw").
+  ok('the "does not open" check is not vacuous', (await ev(notOpen('#noSuchDialog'))) === false, await ev(notOpen('#noSuchDialog')));
   ok('the app says that no models were found', /no models/i.test(await ev(`document.querySelector('#toast').textContent`)),
     await ev(`document.querySelector('#toast').textContent`));
   await ev(`state.models = window.__savedModels; 1`);

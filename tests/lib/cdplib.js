@@ -37,6 +37,27 @@ function isHarnessBrowser(pid, port) {
   return true;
 }
 
+// The Chrome profile dirs of this harness for a port: "chrome-prof-<port>" (old runs)
+// and "chrome-prof-<port>-<pid>" (one per run). The dir of a live run is not ours to delete.
+function profileDirs(port) {
+  let names = [];
+  try { names = fs.readdirSync(T); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    const m = n.match(new RegExp(`^chrome-prof-${port}(?:-(\\d+))?$`));
+    if (m) out.push({ name: n, pid: m[1] ? Number(m[1]) : null });
+  }
+  return out;
+}
+// Remove the profiles of the runs that are gone — a Chrome profile is tens of MB and
+// must not pile up in the test temp dir.
+function sweepProfiles(port) {
+  for (const p of profileDirs(port)) {
+    if (p.pid && p.pid !== process.pid && pidAlive(p.pid)) continue; // another live run owns it
+    try { fs.rmSync(path.join(T, p.name), { recursive: true, force: true }); } catch { /* gone */ }
+  }
+}
+
 // Free a debug port before the browser starts on it.
 // Only browsers of this harness are stopped (SIGTERM first, SIGKILL after a grace
 // period). A process that belongs to somebody else is never killed — if it still
@@ -51,6 +72,7 @@ async function freePort(port) {
   for (const pid of ours()) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
   for (let i = 0; i < 25 && ours().length; i++) await sleep(100);
   for (let i = 0; i < 25 && listenerPids(port).length; i++) await sleep(100); // wait until the port is free
+  sweepProfiles(port);
   return listenerPids(port);
 }
 
@@ -60,13 +82,16 @@ async function launch(url, port, { extraArgs = [], width = 1400, height = 800, p
   const left = await freePort(port);
   if (left.length) throw new Error(`Port ${port} is used by another process (pid ${left.join(', ')}) — close it or free the port; the harness does not kill foreign processes.`);
   const profile = `${T}/chrome-prof-${port}-${process.pid}`;
-  fs.rmSync(`${T}/chrome-prof-${port}`, { recursive: true, force: true }); // fresh profile every run
+  fs.rmSync(profile, { recursive: true, force: true }); // fresh profile every run
   const chrome = spawn((process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
     ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, `--window-size=${width},${height}`, ...extraArgs, 'about:blank'], { stdio: 'ignore' });
   const killChrome = () => { try { chrome.kill(); } catch { /* already gone */ } };
+  const cleanProfile = () => { try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* gone */ } };
+  chrome.on('exit', cleanProfile); // a finished browser must not leave its profile behind
   process.on('exit', killChrome); // a crashed test must not leave the browser behind
   process.on('SIGINT', () => { killChrome(); process.exit(130); }); // 'exit' does not fire on Ctrl+C
   process.on('SIGTERM', () => { killChrome(); process.exit(143); });
+  process.on('SIGHUP', () => { killChrome(); process.exit(129); }); // closing the terminal does the same
   let targets;
   for (let i = 0; i < 40; i++) { try { targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); if (targets.find((t) => t.type === 'page')) break; } catch {} await sleep(250); }
   const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
@@ -124,4 +149,4 @@ async function launch(url, port, { extraArgs = [], width = 1400, height = 800, p
   }
   return h;
 }
-module.exports = { launch, sleep, T, freePort, listenerPids };
+module.exports = { launch, sleep, T, freePort, listenerPids, profileDirs, sweepProfiles };

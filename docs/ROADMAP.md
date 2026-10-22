@@ -121,7 +121,7 @@ For every step: branch, build, add `tests/stepN-*.js`, run `tests/run.sh`, updat
 - **Troubleshooting:** Settings > Troubleshooting with server log view, diagnostic report (versions, Ollama reachability, model list, no chat content), data folder path.
 - Tests: usage numbers stored; `speechSynthesis` mocked; find counts; export content; tab behaviours; model-switch regenerate creates a fork with a different model.
 
-**Done** on branch `step-8-quickwins` (tests: `tests/step8-quickwins.js` — 83 assertions — plus `tests/lib/harness-checks.js` — 8 assertions; `tests/run.sh 8`).
+**Done** on branch `step-8-quickwins` (tests: `tests/step8-quickwins.js` — 84 assertions — plus `tests/lib/harness-checks.js` — 13 assertions; `tests/run.sh 8`).
 Handoff notes:
 - The step-8 UI lives in `public/features/quickwins.js`, a classic script loaded after `app.js`; it uses the new `hooks` object in `app.js`
   (`onRender`, `onMsgAction`, `onOpenChat`, `onNewChat`, `onReply`) so `app.js` stays untouched. Later steps can add their own `public/features/*.js` the same way.
@@ -147,6 +147,19 @@ Fix round 1 (same branch, second commit):
 - The stderr of an MCP server never reaches the server log any more. `mcp.js` keeps it apart from the error message; the log only shows the status
   ("MCP <name>: error — details in Settings > Tools"), the stderr itself stays in the Tools dialog.
 - The model chooser and the compare dialog do not open when Ollama reports no models — they say so instead of starting with an empty list.
+
+Fix round 2 (same branch, third commit — test harness only, no change to the shipped feature code):
+- The Chrome profile of a run is deleted again: the profile dir is `chrome-prof-<port>-<pid>` and is removed when the browser exits, and every
+  `chrome-prof-<port>` dir left over by an earlier run is swept before the browser starts (the profile of a still running run is kept).
+- A closed terminal stops the browser: the harness handles `SIGHUP` like `SIGINT` and `SIGTERM` (`process.on('exit')` does not fire on a signal).
+- The harness checks do not use the fixed debug ports 9390/9391/9392 any more — they take a free port from the OS. The checks even occupy the old
+  fixed ports while they run, so a step-8 run no longer fails with a misleading message when something else holds one of them.
+- The step-4 thinking check no longer lets the thinking text stand in for the live indicator: the "open and live" check comes from the DOM alone
+  (a `MutationObserver` watches it, so a short-lived live block is not missed), and the thinking text of the finished message is a separate
+  assertion. A broken live class now fails the test.
+- The step-8 "the dialog does not open" assertions ask for the element to exist as well (`!!document.querySelector(...) && !...open`): a page
+  that throws answers with a truthy "EXC ..." string, so the old form could pass without checking anything. A companion assertion proves the
+  check is not vacuous.
 
 ### Step 9: import from Claude Desktop
 - Detect the Claude config path per OS (macOS above; Windows `%APPDATA%\Claude`; Linux `~/.config/Claude`). Read-only parse of `mcpServers` (`command`, `args[]`, `env{}`).
