@@ -99,6 +99,27 @@ const { launch, sleep } = require('./lib/cdplib');
   ok('thinkMs stored on the message', (await ev(`state.chat.messages.at(-1).thinkMs`)) > 0);
   await shot('step4-thought');
 
+  // ---- the model may ask to use a skill ----------------------------------
+  // The starter skills are in the system prompt, so a question like this one can make the
+  // model ask for the `explain` skill. The card is answered like a user would answer it,
+  // and the turn goes on until the answer is there.
+  const finishTurn = async (ms = 180000) => {
+    const end = Date.now() + ms;
+    let idle = 0;
+    while (Date.now() < end) {
+      if (await ev(`!!document.querySelector('.toolcall.awaiting')`)) {
+        idle = 0;
+        await ev(`document.querySelector('.toolcall.awaiting [data-tc=once]').click(); 1`);
+        await sleep(600);
+        continue;
+      }
+      if (await ev(`!state.streaming && !state.toolsBusy`)) { if (++idle >= 4) return true; } else idle = 0;
+      await sleep(250);
+    }
+    return false;
+  };
+  ok('the turn ends (a skill card is answered if the model asks for one)', await finishTurn());
+
   // ---- auto title ---------------------------------------------------------
   const prefix = 'Explain step by step why the sky appears blue.';
   ok('auto title replaces the message-prefix title', await waitFor(`state.chat.titled === true && state.chat.title !== ${JSON.stringify(prefix)}`, 60000), `"${prefix}" -> "${await ev('state.chat.title')}"`);
@@ -108,8 +129,17 @@ const { launch, sleep } = require('./lib/cdplib');
 
   // ---- thinking OFF -------------------------------------------------------
   await ev(`document.querySelector('#thinkToggle').click(); 1`);
-  await ask('Reply with the single word: pong');
-  ok('with Thinking off, no reasoning block is produced', (await ev(`state.chat.messages.at(-1).thinking || ''`)) === '');
+  const beforeOff = await ev(`state.chat.messages.length`);
+  await ev(`send('Reply with the single word: pong'); 1`);
+  await finishTurn();
+  // The reply of the assistant must really be there: without it the message that is
+  // checked below would be the one of the user, and the assertion would prove nothing.
+  const gotReply = await waitFor(`state.chat.messages.length >= ${beforeOff + 2} && (state.chat.messages.at(-1) || {}).role === 'assistant'`, 120000);
+  ok('the reply of the assistant is there', gotReply, 'messages: ' + String(await ev(`state.chat.messages.length`)));
+  const offRole = await ev(`(state.chat.messages.at(-1) || {}).role`);
+  const offThinking = await ev(`(state.chat.messages.at(-1) || {}).thinking || ''`);
+  ok('with Thinking off, no reasoning block is produced', offRole === 'assistant' && offThinking === '',
+    'role: ' + offRole + ' thinking: ' + JSON.stringify(offThinking));
   await ev(`document.querySelector('#thinkToggle').click(); 1`);
 
   // ---- edit with branching ------------------------------------------------

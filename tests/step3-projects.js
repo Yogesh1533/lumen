@@ -5,10 +5,10 @@ const env = { URL: process.env.LUMEN_URL || 'http://localhost:3101', FILE: path.
 
 (async () => {
   const h = await launch(env.URL, 9347);
-  const { ev, ok, waitFor, shot, cmd } = h;
+  const { ev, ok, waitFor, shot, cmd, ask } = h;
   await ev(`window.confirm = () => true; document.querySelector('#thinkToggle').click(); 1`); // thinking off: faster
-  // Variant of h.ask: waits for the assistant reply of a (possibly project) chat to finish.
-  const ask = async (q) => { await ev(`send(${JSON.stringify(q)}); 1`); await sleep(500); await waitFor('!state.streaming && state.chat.messages.length >= 2', 150000); await sleep(800); return ev(`state.chat.messages.at(-1).content`); };
+  // h.ask answers a skill card like a user would and waits for the reply of the
+  // assistant, so the answer that is checked below is really the answer.
 
   // 1. create a project through the UI
   await ev(`document.querySelector('#newProject').click(); 1`);

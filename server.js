@@ -7,6 +7,7 @@ const { McpManager } = require('./mcp');
 const webtools = require('./webtools');
 const claude = require('./claude');
 const zip = require('./zip');
+const skills = require('./skills');
 const mcp = new McpManager();
 
 const PORT = process.env.PORT || 3100;
@@ -29,10 +30,20 @@ try { projects = JSON.parse(fs.readFileSync(PROJ_FILE, 'utf8')); } catch { proje
 const SETTINGS_FILE = path.join(path.dirname(DATA_FILE), 'settings.json');
 // Imported extensions are unpacked here: data/extensions/<id>.
 const EXT_DIR = path.join(path.dirname(DATA_FILE), 'extensions');
-let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [], toolToggles: {}, extensions: {}, web: { enabled: false, provider: '', searxngUrl: '', braveKey: '' } };
+// The skills of the user live in data/skills/<name>/ (a SKILL.md plus its own files).
+const SKILLS_DIR = path.join(path.dirname(DATA_FILE), 'skills');
+let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [], toolToggles: {}, extensions: {}, skills: {}, web: { enabled: false, provider: '', searxngUrl: '', braveKey: '' } };
 try { const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); settings = { ...settings, ...saved, web: { ...settings.web, ...(saved.web || {}) } }; } catch { /* first run */ }
 if (!settings.toolToggles || typeof settings.toolToggles !== 'object') settings.toolToggles = {};
 if (!settings.extensions || typeof settings.extensions !== 'object') settings.extensions = {};
+if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
+// The leftovers of an upload that a crash left behind are swept away first: the backup
+// of a skill that was replaced is put back, and the starter skills are only installed
+// where there is no skill of the user.
+skills.sweepStaging(SKILLS_DIR, settings);
+// The starter skills are copied into the data folder on the first run. A skill that the
+// user has edited is never overwritten, and a skill that the user deleted stays deleted.
+skills.ensureStarters(SKILLS_DIR, settings);
 const timers = new Map();
 // A small ring buffer of the server's own log lines, shown in Settings > Troubleshooting.
 const LOG_MAX = 300;
@@ -155,10 +166,15 @@ const sameServer = (c, s) => (c.transport || 'stdio') === (s.transport || 'stdio
   && (c.url || '') === (s.url || '');
 
 const publicSettings = () => ({ ...settings, mcpServers: settings.mcpServers.map(viewCfg), extensions: undefined, web: { ...settings.web, braveKey: '', hasBraveKey: !!settings.web.braveKey } });
-// The built-in "Web" tools appear as a virtual MCP server when enabled.
-const builtinServer = () => settings.web.enabled
-  ? { id: 'builtin', name: 'Web', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: webtools.tools(settings.web) }
-  : null;
+// The built-in servers are virtual MCP servers: they have no process, they only run
+// inside Lumen. The web tools appear when they are switched on, the skills server
+// appears when at least one skill is switched on (a skill is a folder on this computer).
+const builtinServers = () => {
+  const out = [];
+  if (settings.web.enabled) out.push({ id: 'builtin', name: 'Web', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: webtools.tools(settings.web) });
+  if (skills.anyEnabled(SKILLS_DIR, settings)) out.push({ id: 'skills', name: 'Skills', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: skills.tools() });
+  return out;
+};
 const projectSummary = ({ files, ...p }) => ({ ...p, files: files.map(({ text, ...f }) => ({ ...f, chars: text.length })) });
 const summary = ({ messages, ...c }) => ({ ...c, count: messages.length });
 
@@ -346,12 +362,12 @@ async function api(req, res, url) {
 
   // ---- MCP servers ----------------------------------------------------------
   if (parts[0] === 'mcp') {
-    const builtinView = () => {
-      const b = builtinServer();
-      if (!b) return null;
+    // The built-in servers, with the tools that are switched off marked.
+    const builtinViews = () => builtinServers().map((b) => {
       const off = disabledTools(b.id);
       return { ...b, tools: (b.tools || []).map((t) => ({ ...t, enabled: !off.has(t.name) })) };
-    };
+    });
+    const builtinView = (id) => builtinViews().find((b) => b.id === id) || null;
     // Switch tools of a provider on or off (the list of the ones that are off).
     const setTools = (provider, body) => {
       const list = Array.isArray(body.disabled) ? body.disabled.filter((x) => typeof x === 'string').slice(0, 200) : [];
@@ -363,8 +379,7 @@ async function api(req, res, url) {
     const id = parts[1];
     if (!id && m === 'GET') {
       const list = settings.mcpServers.map(view);
-      const b = builtinView();
-      return send(res, 200, b ? [b, ...list] : list);
+      return send(res, 200, [...builtinViews(), ...list]);
     }
     if (!id && m === 'POST') {
       if (settings.mcpServers.length >= 20) return send(res, 400, { error: 'Too many servers' });
@@ -377,10 +392,17 @@ async function api(req, res, url) {
     if (id === 'call' && m === 'POST') {
       const b = await readBody(req);
       if (b.server === 'builtin') {
-        const bs = builtinServer();
+        const bs = builtinViews().find((x) => x.id === 'builtin');
         if (!bs || !bs.tools.some((t) => t.name === b.tool)) return send(res, 200, { isError: true, text: 'That web tool is not available' });
         if (!toolEnabled('builtin', String(b.tool))) return send(res, 200, { isError: true, text: 'That tool is switched off in Lumen' });
         return send(res, 200, await webtools.call(String(b.tool), b.arguments, settings.web));
+      }
+      // The skills tools only read the folders of the skills of the user.
+      if (b.server === 'skills') {
+        const bs = builtinViews().find((x) => x.id === 'skills');
+        if (!bs || !bs.tools.some((t) => t.name === b.tool)) return send(res, 200, { isError: true, text: 'That skills tool is not available' });
+        if (!toolEnabled('skills', String(b.tool))) return send(res, 200, { isError: true, text: 'That tool is switched off in Lumen' });
+        return send(res, 200, await skills.call(String(b.tool), b.arguments || {}, { root: SKILLS_DIR, settings }));
       }
       if (!settings.mcpServers.some((c) => c.id === b.server && c.enabled)) return send(res, 404, { error: 'Unknown or disabled server' });
       // A tool that is switched off never runs, not even when something asks for it directly.
@@ -393,13 +415,13 @@ async function api(req, res, url) {
       for (const cfg of settings.mcpServers) if (cfg.enabled) logStatus(cfg, await mcp.connect(cfg));
       return send(res, 200, settings.mcpServers.map(view));
     }
-    // The tool switches of the built-in (web) tools.
-    if (id === 'builtin' && parts[2] === 'tools' && m === 'PUT') {
-      setTools('builtin', await readBody(req));
-      return send(res, 200, builtinView() || { id: 'builtin' });
+    // The tool switches of the built-in servers (the web tools and the skills tools).
+    if ((id === 'builtin' || id === 'skills') && parts[2] === 'tools' && m === 'PUT') {
+      setTools(id, await readBody(req));
+      return send(res, 200, builtinView(id) || { id });
     }
-    // The built-in web tools have no process, so they have no log.
-    if (id === 'builtin' && parts[2] === 'logs' && m === 'GET') return send(res, 200, { lines: [] });
+    // The built-in servers have no process, so they have no log.
+    if ((id === 'builtin' || id === 'skills') && parts[2] === 'logs' && m === 'GET') return send(res, 200, { lines: [] });
     const idx = settings.mcpServers.findIndex((c) => c.id === id);
     if (idx < 0) return send(res, 404, { error: 'not found' });
     const cur = settings.mcpServers[idx];
@@ -443,6 +465,79 @@ async function api(req, res, url) {
       delete settings.toolToggles[id]; // the switches of a removed server go with it
       saveSettings();
       return send(res, 200, { ok: true });
+    }
+  }
+
+  // ---- skills ----------------------------------------------------------------
+  // A skill is a folder with a SKILL.md (frontmatter with a name and a description) plus
+  // files of its own. The folders live in data/skills/<name>/; the model only reads them.
+  if (parts[0] === 'skills') {
+    const sub = parts[1] || '';
+    // A name that is not a name (a broken escape) is refused with a 400, not a 500.
+    let name = '';
+    try { name = sub ? decodeURIComponent(sub) : ''; }
+    catch { return send(res, 400, { error: 'That name is not a skill name' }); }
+    // The list of the skills and the limits that apply to them.
+    if (!sub && m === 'GET') {
+      return send(res, 200, { skills: skills.list(SKILLS_DIR, settings), limits: { maxBytes: skills.MAX_BYTES } });
+    }
+    // A new skill, written by hand.
+    if (!sub && m === 'POST') {
+      const b = await readBody(req);
+      try {
+        const s = skills.create(SKILLS_DIR, settings, b);
+        saveSettings();
+        return send(res, 200, s);
+      } catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+    }
+    // A zip that is uploaded as a skill. The bundle is unpacked into a folder of its own
+    // first, so a bundle that is refused leaves nothing behind.
+    if (sub === 'upload' && !parts[2] && m === 'POST') {
+      const b = await readBody(req);
+      let buf;
+      try { buf = Buffer.from(String(b.file || ''), 'base64'); } catch { buf = Buffer.alloc(0); }
+      if (!buf.length) return send(res, 400, { error: 'The bundle is empty' });
+      try {
+        const s = skills.extract(SKILLS_DIR, settings, String(b.name || '').trim(), buf);
+        saveSettings();
+        return send(res, 200, s);
+      } catch (e) { return send(res, 400, { error: 'The bundle was refused: ' + String(e.message || e) }); }
+    }
+    // One more file in the folder of a skill.
+    if (parts[2] === 'files' && m === 'POST') {
+      const b = await readBody(req);
+      let buf;
+      try { buf = Buffer.from(String(b.data || ''), 'base64'); } catch { buf = Buffer.alloc(0); }
+      if (!buf.length) return send(res, 400, { error: 'The file is empty' });
+      try { return send(res, 200, skills.addFile(SKILLS_DIR, settings, name, b.path, buf)); }
+      catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+    }
+    // One file of a skill is removed.
+    if (parts[2] === 'files' && m === 'DELETE') {
+      try { return send(res, 200, skills.removeFile(SKILLS_DIR, settings, name, url.searchParams.get('path') || '')); }
+      catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+    }
+    // One skill with its files.
+    if (!parts[2] && m === 'GET') {
+      try { return send(res, 200, skills.read(SKILLS_DIR, settings, name)); }
+      catch (e) { return send(res, 404, { error: String(e.message || e) }); }
+    }
+    // The SKILL.md is edited, or the skill is switched on or off.
+    if (!parts[2] && m === 'PUT') {
+      const b = await readBody(req);
+      try {
+        const s = skills.update(SKILLS_DIR, settings, name, b);
+        saveSettings();
+        return send(res, 200, s);
+      } catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+    }
+    // A skill is removed, with its folder.
+    if (!parts[2] && m === 'DELETE') {
+      try {
+        skills.remove(SKILLS_DIR, settings, name);
+        saveSettings();
+        return send(res, 200, { ok: true });
+      } catch (e) { return send(res, 400, { error: String(e.message || e) }); }
     }
   }
 

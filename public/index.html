@@ -39,6 +39,7 @@
       <div class="spacer"></div>
       <label class="toggle" id="thinkWrap" title="Let reasoning models think before answering"><input type="checkbox" id="thinkToggle" checked> Thinking</label>
       <label class="toggle" title="Temporary chats are not saved"><input type="checkbox" id="tempToggle"> Temporary</label>
+      <button id="skillsBtn" class="ghost" title="Skills">🧩 Skills</button>
       <button id="toolsBtn" class="ghost" title="Tools &amp; MCP servers">🔧 Tools</button>
       <button id="usageBtn" class="ghost" title="Token usage">📊 Usage</button>
       <button id="findBtn" class="ghost" title="Find in conversation">🔍</button>
@@ -222,6 +223,44 @@
     </div>
   </div>
 </dialog>
+<dialog id="skillsDlg">
+  <div>
+    <h2>Skills</h2>
+    <p class="sub">A skill is a folder with a SKILL.md: instructions for the model, plus files of its own.
+      Only the skills that are switched on are offered to the model, and every call still needs your approval.</p>
+    <div class="addrow">
+      <button type="button" id="skillNew" class="ghost">New skill…</button>
+      <button type="button" id="skillUpload" class="ghost">Upload a zip…</button>
+      <input id="skillZipInput" type="file" accept=".zip,application/zip" hidden>
+      <span class="spacer"></span>
+    </div>
+    <div id="skillList"></div>
+    <h3>Approval</h3>
+    <p class="sub">A skills tool asks before it runs. “Always allow” is for this one tool on this computer only.</p>
+    <div id="skillTools"></div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="skillsClose" class="primary">Done</button></div>
+  </div>
+</dialog>
+<dialog id="skillEditDlg">
+  <div>
+    <h2 id="skTitle">Skill</h2>
+    <label>Name <input id="skName" readonly>
+      <span class="sub">The name is the folder of the skill, so it cannot be changed.</span>
+    </label>
+    <label>SKILL.md <span class="sub">Frontmatter with name and description, then the instructions for the model.</span>
+      <textarea id="skContent" rows="14" spellcheck="false"></textarea>
+    </label>
+    <div class="files-head"><strong>Files</strong><span id="skSize" class="sub"></span><button type="button" id="skAddFiles" class="ghost">Add files…</button></div>
+    <input id="skFileInput" type="file" multiple hidden>
+    <div id="skFiles"></div>
+    <div class="dlg-actions">
+      <button type="button" id="skDelete" class="ghost danger">Delete skill</button>
+      <span class="spacer"></span>
+      <button type="button" id="skCancel" class="ghost">Close</button>
+      <button type="button" id="skSave" class="primary">Save</button>
+    </div>
+  </div>
+</dialog>
 <dialog id="envDlg">
   <div>
     <h2>Environment variables</h2>
@@ -334,5 +373,6 @@
 <script src="/app.js"></script>
 <script src="/features/quickwins.js"></script>
 <script src="/features/claudeimport.js"></script>
+<script src="/features/skills.js"></script>
 </body>
 </html>

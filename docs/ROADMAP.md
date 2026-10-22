@@ -17,7 +17,12 @@ Step 9 (import from Claude Desktop) is built, tested and committed on branch `st
 a review dialog for Claude's MCP servers, extension bundles (`.mcpb`/`.dxt`), a switch per tool,
 a per-server log viewer and "Reload all".
 
-**Next: steps 10 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 10 (skills) is built, tested and committed on branch `step-10-skills` (not merged yet):
+a skill is a folder with a `SKILL.md`; a Skills dialog (list, switch on and off, write and edit,
+upload a zip or loose files, delete), two starter skills, the skills tools `use_skill` and
+`read_skill_file`, and the enabled skills in the system prompt.
+
+**Next: steps 11 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -29,12 +34,15 @@ a per-server log viewer and "Reload all".
 | `public/app.js` | The whole single-page UI (vanilla JS, no build step) |
 | `public/features/quickwins.js` | Step-8 UI (usage, read aloud, find, export, tabs, compare, troubleshooting); a classic script loaded after `app.js`, sharing its global scope |
 | `public/features/claudeimport.js` | Step-9 UI (import dialog, extension form, tool switches, log viewer); a classic script loaded after `app.js` |
+| `skills.js` | The skills of the user: the folders in `data/skills/<name>/`, the two read-only tools of the model |
+| `public/features/skills.js` | Step-10 UI (Skills dialog, the editor of a `SKILL.md`, the uploads, the approval switches); a classic script loaded after `app.js` |
+| `starter-skills/` | The two skills that ship with Lumen (`summarise`, `explain`); copied into `data/skills/` on the first run, never overwritten |
 | `claude.js` | Claude Desktop's config and extensions — **read-only** (never writes in Claude's folders) |
 | `zip.js` | Dependency-free reader for `.mcpb`/`.dxt` bundles, with the limits and the path checks |
 | `public/index.html`, `style.css` | Markup and styles |
 | `bin/lumen-app.js` | Opens Lumen in a Chrome/Edge app window |
 | `tests/` | Browser tests driven over CDP (see section 6) |
-| `data/` | Runtime data (git-ignored): `chats.json`, `projects.json`, `settings.json` |
+| `data/` | Runtime data (git-ignored): `chats.json`, `projects.json`, `settings.json`, `skills/<name>/` (the skills of the user) |
 
 Run: `npm start` (port 3100) or `npm run app`. Node 22+. Ollama at `http://127.0.0.1:11434` (`OLLAMA_BASE_URL`).
 
@@ -240,8 +248,127 @@ Handoff notes:
 - A skill is a folder with `SKILL.md` (YAML frontmatter `name`, `description`) plus optional files, stored in `data/skills/<name>/`. 30 MB limit.
 - UI: Skills dialog (list, enable/disable, create/edit `SKILL.md`, upload zip or files, delete) with two starter skills.
 - Model integration: enabled skills' names and one-line descriptions go into the system prompt; built-in tools `use_skill(name)` (returns the SKILL.md body and file list) and
-  `read_skill_file(name, path)`. `use_skill` auto-approved by default (read-only, local) but configurable.
+  `read_skill_file(name, path)`. ~~`use_skill` auto-approved by default (read-only, local) but configurable.~~ **Corrected: approval is required by default** (see the handoff notes below).
 - Tests: listing in prompt; real model calls `use_skill`; traversal blocked in `read_skill_file`; zip upload; size limit; disable hides it.
+
+**Done** on branch `step-10-skills` (tests: `tests/step10-skills.js` — 112 assertions; `tests/run.sh 10`).
+Handoff notes:
+
+- **New files:** `skills.js` (the folders, the validation, the two tools of the model), `public/features/skills.js` (the UI),
+  `starter-skills/summarise/` (`SKILL.md` + `checklist.md`) and `starter-skills/explain/` (`SKILL.md` + `examples.md`),
+  `tests/step10-skills.js`. `server.js` grew the `/api/skills*` routes; `public/app.js` grew `loadSkills()` and `skillsPrompt()`.
+- **`builtinServer()` became `builtinServers()`** (an array), as the plan asked: the web server keeps the id `builtin`, the skills server gets the id `skills`
+  (`builtin: true`, `transport: 'builtin'`, `status: 'connected'`, and it is listed in `GET /api/mcp` next to the web server, so its tools can be switched off like any other).
+  `POST /api/mcp/call` dispatches `server: 'skills'` to the skills implementation, exactly like `server: 'builtin'` goes to `webtools.call` — through the same
+  `toolEnabled(provider, name)` check, so a switched-off skills tool never runs. `PUT /api/mcp/skills/tools` writes the switches with the step-9 format contract
+  (`settings.toolToggles['skills'][tool] === false` means off; the provider id is the server id).
+- **The approval ruling (the plan's section 5 and the security invariants disagreed).** The invariants win: **a skills tool asks for approval like every other tool.**
+  The Skills dialog has a switch per skills tool — "ask before a skill is used" — and it is **on** by default. Turning it **off** writes "always allow" for that exact
+  tool into the **existing** client store (`toolAllow()` / `saveAllow()` in `public/app.js`, the same localStorage store the "Always allow" button writes to). That is the
+  invariant's own exception and nothing more: no server-side auto-approval, no new bypass, no change to the approval flow. `read_skill_file` is **not** exempt — it is the
+  tool that touches a path inside a skill folder, so it must be able to refuse a traversal.
+- **The 30 MB limit holds however the skill arrives.** `zip.js` now takes a limits override (`readZip(buf, limits)` / `extract(buf, destDir, limits)`, merged over the
+  defaults) — **the defaults did not change** (the step-9 tests pin them). A skill bundle uses 30 MB per file, 30 MB in total and 30 MB per upload; the same limit is
+  enforced on the folder as a whole after the extraction, on a hand-written `SKILL.md` and on a loose file. The limits are measured on the bytes that are really
+  produced, not on the sizes the bundle claims. The ratio limit of the general bundle reader (200:1) is **2000:1 for skill bundles**: there the 30 MB byte limits are the
+  ceiling, and 200:1 would refuse a legitimate file of zeroes (a deflate stream cannot expand more than about 1000:1 anyway).
+- **A bundle is unpacked into a folder of its own first** (`data/skills/.staging-<uuid>`), so a bundle that is refused leaves nothing behind and the skill of the user is
+  only replaced when the bundle is good. The staging folder is **inside** `data/skills/` (Lumen never writes next to it) and its name is not a skill name, so it is never
+  listed; a folder of it that a crash left behind is swept away at the next start (`skills.sweepStaging()`). A bundle whose `SKILL.md` sits in a folder of its own is
+  accepted (the folder is unwrapped).
+- **An upload that replaces a skill says so.** The dialog asks first ("There is already a skill called X. This upload replaces it: its N files (…) are removed…") and
+  the server is careful: the old folder is **moved aside** (`<name>.old-<uuid>`) and only deleted when the new folder is in place — a bundle that fails on the way puts
+  the old skill back.
+- **The name is a folder name**, so it must match `^[a-z0-9][a-z0-9_-]{0,39}$` — no slashes, no dots, no `..`, no spaces, at most 40 characters. A path inside a skill may
+  not be absolute, may not hold `..`, and **a symlink is never used** — not the file itself and not a folder on the way to it. Every path is held against the **real
+  path of `data/skills/`** (not against the folder of the skill, which may itself be a symlink) and every segment of the path is checked with `lstat` on **every**
+  path of a skill — the read, the write, the delete and the copy — so a symlinked folder inside a skill cannot redirect a write or a delete out of it, and a skill
+  folder that is a symlink to a folder outside is not a skill at all: nothing is read from it, nothing is written into it, and the starter skills are not copied into it.
+- **The tools are read-only.** `use_skill` returns the body of the `SKILL.md` and the list of the files; `read_skill_file` returns one text file (at most 1 MB **of
+  bytes**, counted with `Buffer.byteLength` — the file is cut off on the disk, not read whole — and the answer says that it was cut off). Neither writes, deletes nor
+  runs anything. A skill that is switched off is refused by both and is not in the system prompt.
+- **The system prompt** lists only the enabled skills, with their names and their one-line description, and the block says that the text of a skill is material the user
+  installed on this computer — not an instruction of Lumen. A **Temporary chat still sends the enabled skills to the model**, the same way it sends the files of a
+  project: the invariant of section 2 covers the **memory** only, and a skill is not memory.
+- **The starter skills** are copied into `data/skills/` on the first run and are **never overwritten** (the user may have edited them). A starter that the user
+  **deleted** stays deleted: the name keeps a tombstone in the settings (`settings.skills[name].removed = true`, and `enabled = false`), `ensureStarters()` skips it
+  and the list of the skills does not show it. A new skill with the same name clears the tombstone. The **copy** is proved like every other write of a skill: the
+  target of every starter file is held against the real path of `data/skills/` and every segment of it is checked. A starter file whose target is a symlink is
+  **refused on its own** (it is not written through the symlink) and the rest of the starter is still installed; when the `SKILL.md` itself cannot be proved, the
+  whole starter is refused, because a folder without a `SKILL.md` is not a skill.
+- **The skills server appears only while a skill is switched on** (like the web server, which appears when the web tools are on). With every skill off, Lumen sends
+  no skills tool to the model at all and the server is not in the list of the servers.
+- **The built-in Skills server changes what the earlier steps' tests see.** It is in the list of the servers (`GET /api/mcp`) **while at least one skill is
+  switched on** — with every skill off it is not there at all (see the bullet above), so the list of the servers is as it was before, and the header badge counts
+  2 tools more while the server is there. Three assertions of the earlier steps were therefore changed (the same run on the base commit
+  `f8c05f7` is green without them): `tests/step5-styles-memory.js` — "Normal adds nothing" now asks that the *style* adds no text (the skills block is in the
+  prompt); `tests/step6-mcp-tools.js` — the test server is looked up by its name and not by its place in the list, and the badge is 3 + 2 = 5;
+  `tests/step7-desktop-polish.js` — the web server is looked up by its id (`builtin`), because the Skills server is built in as well.
+- **A model with a skill in its prompt asks to use it — and a test has to answer.** `tests/step4-thinking-branches.js` asks "Explain step by step why the sky
+  appears blue."; with the starter skill `explain` in the system prompt the model asks for that skill instead of answering, and the turn waits for the approval
+  card. The test now answers the card ("Allow once") and waits for the turn to be over (`finishTurn()`), exactly like a user would. The assertions about the
+  thinking block did not change: the message that carries the thinking is the one with the tool call, and its block is closed and timed as before.
+- **Traps in the tests** (worth knowing for the later steps): the CDP harness answers with a truthy `"EXC …"` string when the page throws, so a boolean check has to be
+  compared with `=== true` (the step-10 test has a `t()` helper for that); `fetch` refuses a body on `GET` (the test helper must not send one); and a test must not crash
+  when the route does not exist yet — it has to report a failure and keep going.
+- Not covered by the tests: a skill whose name is `upload` (it works: only `POST /api/skills/upload` is the upload route, the other verbs take the name as it is),
+  and the real drag-and-drop of the file picker (the test sets the files of the input).
+
+**Fix round 1** (the review of the first commit; the changes are in the commit after `afc421a`):
+
+- **A deleted starter does not come back.** The delete leaves a tombstone in the settings (`removed: true`, `enabled: false`) and `ensureStarters()` skips it, so a
+  starter that the user deleted stays deleted — and stays off — after a restart. A starter that the user only **edited** is still there after a restart.
+  (`tests/step10-skills.js`: "a deleted starter does not come back after a restart", "an edited starter is still there after a restart". The test starts a second
+  Lumen with the same data folder — the code path of a restart.)
+- **An upload that replaces a skill says so, and it does not destroy the old skill on the way.** The dialog warns (and can be cancelled); the server moves the old
+  folder aside and deletes it only when the new folder is in place.
+- **The containment is against the real path of `data/skills/`**, and every segment of a path is checked with `lstat` on the write and the delete path. A skill folder
+  that is a symlink to a folder outside is not a skill, and a symlinked folder inside a skill cannot redirect a write or a delete.
+- **The read cap counts bytes**, not characters, and a file that is too big is cut off on the disk.
+- **The skills server is hidden when no skill is on**, so the model gets no useless tool definitions.
+- **The staging folder of an upload is inside `data/skills/`**, and a leftover of a crash is swept away at the start.
+- The tests grew: the deleted/edited starter over a restart, the upload that replaces a skill, the symlinked skill folder and the symlinked subfolder, the read cap,
+  the hidden server, the staging folder, a zip whose `SKILL.md` is in a subfolder, and `DELETE /api/skills/:name/files` in the list of the cross-site requests. Two
+  assertions that proved nothing were replaced: "use_skill does not run anything" now compares the folder of the skill (size, mtime and hash of every file) before
+  and after the call, and the assertion about the model is now "the model called a tool named use_skill" (what it actually proves).
+- `tests/step4-thinking-branches.js` waits for the **reply of the assistant** before it checks that there is no reasoning block (before that, the last message could be
+  the one of the user and the assertion proved nothing).
+- The CDP harness answers a pending approval card like a user would ("Allow once") and waits for the turn to be over (`tests/lib/cdplib.js`, `finishTurn()` and `ask()`), and it
+  waits for a message whose role is **assistant** and whose content is not empty. A skill in the system prompt can make the model ask to use a skill, and the turn then waits
+  for the card: step 3 was the next step that hung on it, and it uses the harness now. The assertions of the earlier steps did not change.
+- The skills API is also called **from the page itself** (the browser's own `fetch`, with the browser's own Host/Origin/Sec-Fetch-Site headers), so `guard()` is exercised the
+  way a request of the user goes through it. The other calls of the test come from Node with the headers a browser sends.
+
+**Fix round 2** (the review of the fix round 1; the changes are in the commit after `2c9ffa2`):
+
+- **Every path of a skill is contained — the read, the write, the delete and the copy.** The folder of the skill is a path too: `skills.skillFolder()` (in
+  `skills.js`) is the one place that proves it. A skill folder that is a symlink is refused (`"A symlink is not used"`), and the real path of the folder must be
+  inside the real path of `data/skills/`. `read()` (the `GET /api/skills/:name`), `update()` (`PUT`), `create()` (`POST`), `remove()`, `addFile()`, `removeFile()`,
+  `extract()` and `mustExist()` (the tools of the model) all go through it, and so do `list()` and `anyEnabled()`, which skip a symlinked folder.
+- **A `SKILL.md` that is a symlink is never written** (`skills.skillMdPath()`): the write would follow it out of the folder of the skill.
+- **A name that is not there is not trusted because it does not exist.** `create()` proves the parent (the folder of the skills) and refuses the name itself when
+  it is a symlink; a folder that is made is proved again before the `SKILL.md` is written into it.
+- **The starter skills are not copied into a symlinked folder** (`ensureStarters()`): the folder is proved before the copy, and a folder that is a symlink is
+  left alone.
+- **The backup of a replaced skill is swept away at the start** (`sweepStaging()`): the old folder of a skill is moved aside as `<name>.old-<uuid>` while a bundle
+  replaces it, and a crash in between leaves that folder behind. If the skill is there, the backup is a leftover and goes; if the skill is not there, the backup
+  **is** the skill and it is put back. The sweep runs **before** the starter skills are installed, so a skill that was put back is not overwritten by a starter.
+- **A Temporary chat still sends the enabled skills to the model**, the same way it sends the files of a project. The invariant of section 2 covers the
+  **memory** only, and a skill is not memory. The sentence is in `README.md` (the skills bullet) and in the step-10 notes above.
+- The sentence "it is always in the list of the servers" was wrong (the Skills server is hidden while no skill is on) and now agrees with the code.
+
+**Fix round 3** (the re-review of the fix round 2; the changes are in the commit after `ed5f412`):
+
+- **The copy of a starter is proved like every other write of a skill** (`ensureStarters()` in `skills.js`). The source of the copy is ours (`starter-skills/`), the
+  target is not: the target of every starter file is now held against the real path of `data/skills/` with `safeInside()`, so every segment of it is checked and a
+  symlink in the way is refused. **A starter file whose target is a symlink is refused on its own** (it is not written through the symlink) and the rest of the
+  starter is still installed; when the `SKILL.md` itself cannot be proved, the **whole starter is refused**, because a folder without a `SKILL.md` is not a skill.
+- **The sweep only puts back a folder that is a skill** (`sweepStaging()`): a backup `<name>.old-<uuid>` that is a symlink (or that is not a real folder) is **not
+  restored — it is deleted as a link**, and the folder it points at is never touched. A backup that is put back is proved with `skillFolder()` first: it must be a
+  real folder inside the real path of `data/skills/`, or the name is put back as it was and nothing is restored.
+- **A refusal is a refusal, not a crash of the file system.** `safeInside()` refuses a path whose folder on the way is not a folder ("That path is not a folder"),
+  and `addFile()` refuses a target that is a folder ("That path is a folder, not a file"), instead of letting the file system answer with `EEXIST` or `EISDIR`.
+- **A name that is not a name is a 400** (`server.js`): a broken escape in the URL (`/api/skills/%`) is refused with a message, not with a 500.
 
 ### Step 11: Side Chat and Split View
 - **Side Chat:** right panel with its own thread seeded with a snapshot of the main conversation ("answer briefly; this is a side question"); never modifies the main chat;

@@ -29,7 +29,9 @@ const { launch, sleep } = require('./lib/cdplib');
   await ev(`document.querySelector('#styleSelect').value = 'concise'; document.querySelector('#styleSelect').dispatchEvent(new Event('change')); 1`);
   ok('selecting Concise injects it into the system prompt', /Response style: Be concise/.test(await ev(`fullSystem('')`)));
   await ev(`document.querySelector('#styleSelect').value = ''; document.querySelector('#styleSelect').dispatchEvent(new Event('change')); 1`);
-  ok('Normal adds nothing', (await ev(`fullSystem('')`)) === '');
+  // "Normal" adds no style text of its own. The prompt is not empty any more: the skills
+  // of the user are in it (step 10).
+  ok('Normal adds nothing', !/Response style/.test(await ev(`fullSystem('')`)));
 
   // ---- custom style via the dialog -----------------------------------------
   await ev(`document.querySelector('#settingsBtn').click(); 1`);
