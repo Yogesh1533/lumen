@@ -1,7 +1,7 @@
 {
   "name": "lumen",
   "version": "1.0.0",
-  "description": "Self-hosted chat UI for local LLMs (Ollama)",
+  "description": "Self-hosted chat UI for local LLMs (Ollama). Needs Node 22+ (the current LTS; Node 18 and 20 are end-of-life).",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

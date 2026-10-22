@@ -228,10 +228,14 @@ function showExtForm(ext) {
       l.innerHTML = `<input type="checkbox" data-k="${esc(k)}" data-t="boolean" ${def.default ? 'checked' : ''}><span>${esc(title)}</span>`;
       l.className = 'check';
     } else if (def.multiple) {
-      // A list: one value per line. A list of secrets is masked while it is typed.
+      // A list: one value per line. A list that is not a secret shows the default of the
+      // manifest. A list of secrets is masked while it is typed and its default stays out
+      // of the page: a secret is only ever typed by the user.
       const style = def.sensitive ? ' style="-webkit-text-security:disc;text-security:disc"' : '';
+      const list = def.sensitive ? ''
+        : (Array.isArray(def.default) ? def.default.join('\n') : (def.default === undefined ? '' : String(def.default)));
       l.innerHTML = `${esc(title)} ${note}
-        <textarea rows="2" data-k="${esc(k)}" data-t="${def.sensitive ? 'secretlist' : 'list'}"${style}${def.required ? ' required' : ''}></textarea>`;
+        <textarea rows="2" data-k="${esc(k)}" data-t="${def.sensitive ? 'secretlist' : 'list'}"${style}${def.required ? ' required' : ''}>${esc(list)}</textarea>`;
     } else if (def.sensitive) {
       l.innerHTML = `${esc(title)} ${note}
         <input type="password" data-k="${esc(k)}" data-t="secret" placeholder="${def.default ? '••••' : ''}" autocomplete="off">`;

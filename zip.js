@@ -36,6 +36,13 @@ function safeName(name) {
   return parts.join('/');
 }
 
+// The name of an entry goes into an error message. It comes from an outside file, so the
+// control characters are removed and the name is shortened.
+function safeLabel(name) {
+  const n = String(name == null ? '' : name).replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+  return n.length > 80 ? n.slice(0, 80) + '…' : (n || 'the file');
+}
+
 // The central directory: one record per file, with the sizes and the local header offset.
 function readDirectory(buf) {
   const eocd = findEOCD(buf);
@@ -63,9 +70,9 @@ function readDirectory(buf) {
     if (flags & 0x1) throw new Error('Encrypted zip entries are not supported');
     if (size === 0xffffffff || compSize === 0xffffffff || localOff === 0xffffffff) throw new Error('Zip64 bundles are not supported');
     // A symlink (unix mode in the high 16 bits) could point outside the folder.
-    if ((madeBy >> 8) === 3 && ((external >>> 16) & 0xf000) === 0xa000) throw new Error(`The bundle contains a symlink (${name})`);
-    if (size > LIMITS.maxFileBytes) throw new Error(`"${name}" is bigger than the file limit (${LIMITS.maxFileBytes} bytes)`);
-    if (compSize > 0 && size / compSize > LIMITS.maxRatio) throw new Error(`"${name}" expands too much — refusing a zip bomb`);
+    if ((madeBy >> 8) === 3 && ((external >>> 16) & 0xf000) === 0xa000) throw new Error(`The bundle contains a symlink (${safeLabel(name)})`);
+    if (size > LIMITS.maxFileBytes) throw new Error(`"${safeLabel(name)}" is bigger than the file limit (${LIMITS.maxFileBytes} bytes)`);
+    if (compSize > 0 && size / compSize > LIMITS.maxRatio) throw new Error(`"${safeLabel(name)}" expands too much — refusing a zip bomb`);
     totalSize += size;
     if (totalSize > LIMITS.maxTotalBytes) throw new Error(`The bundle is bigger than the size limit (${LIMITS.maxTotalBytes} bytes)`);
     entries.push({ name, size, compSize, method, localOff });
@@ -86,7 +93,14 @@ function readData(buf, e) {
   if (e.method === 0) return Buffer.from(raw);
   if (e.method === 8) {
     try { return zlib.inflateRawSync(raw, { maxOutputLength: LIMITS.maxFileBytes }); }
-    catch { throw new Error(`"${e.name}" is bigger than the file limit (${LIMITS.maxFileBytes} bytes)`); }
+    catch (err) {
+      // A stream that grows past the limit is a size problem. A broken stream is not:
+      // that error belongs to the bundle, and it is passed on as it is.
+      if (err && err.code === 'ERR_BUFFER_TOO_LARGE') {
+        throw new Error(`"${safeLabel(e.name)}" is bigger than the file limit (${LIMITS.maxFileBytes} bytes)`);
+      }
+      throw err;
+    }
   }
   throw new Error(`Unsupported compression method ${e.method}`);
 }
@@ -96,16 +110,16 @@ function readData(buf, e) {
 // that lies in its directory cannot get past the limits.
 function readZip(buf) {
   if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf);
-  if (buf.length > LIMITS.maxBundleBytes) throw new Error('The bundle is bigger than the size limit');
+  if (buf.length > LIMITS.maxBundleBytes) throw new Error(`The bundle is bigger than the upload limit (${LIMITS.maxBundleBytes} bytes)`);
   const out = [];
   let total = 0;
   for (const e of readDirectory(buf)) {
     if (e.name.endsWith('/')) continue; // directory entry
     const name = safeName(e.name);
-    if (!name) throw new Error(`The bundle contains an unsafe path ("${e.name}")`);
+    if (!name) throw new Error(`The bundle contains an unsafe path ("${safeLabel(e.name)}")`);
     const data = readData(buf, e);
-    if (data.length > LIMITS.maxFileBytes) throw new Error(`"${e.name}" is bigger than the file limit (${LIMITS.maxFileBytes} bytes)`);
-    if (e.compSize > 0 && data.length / e.compSize > LIMITS.maxRatio) throw new Error(`"${e.name}" expands too much — refusing a zip bomb`);
+    if (data.length > LIMITS.maxFileBytes) throw new Error(`"${safeLabel(e.name)}" is bigger than the file limit (${LIMITS.maxFileBytes} bytes)`);
+    if (e.compSize > 0 && data.length / e.compSize > LIMITS.maxRatio) throw new Error(`"${safeLabel(e.name)}" expands too much — refusing a zip bomb`);
     total += data.length;
     if (total > LIMITS.maxTotalBytes) throw new Error(`The bundle is bigger than the size limit (${LIMITS.maxTotalBytes} bytes)`);
     out.push({ name, data });

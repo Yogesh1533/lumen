@@ -35,7 +35,12 @@ const { StdioServerTransport } = req('@modelcontextprotocol/sdk/server/stdio.js'
 const z = req('zod');
 const server = new McpServer({ name: 'lumen-fixture-extension', version: '1.0.0' });
 server.registerTool('echo', { description: 'Echo a value back.', inputSchema: { value: z.string() } },
-  async ({ value }) => ({ content: [{ type: 'text', text: 'echo: ' + value }] }));
+  async ({ value }) => {
+    // Every call leaves a line in the log — that is how the test proves that the
+    // log viewer really fetches the log again when it is refreshed.
+    process.stderr.write('lumen-test fixture tool called: echo\\n');
+    return { content: [{ type: 'text', text: 'echo: ' + value }] };
+  });
 server.registerTool('ping', { description: 'Answer with pong.', inputSchema: {} },
   async () => ({ content: [{ type: 'text', text: 'pong' }] }));
 process.stderr.write('fixture extension ready: ' + process.argv.slice(2).join(' ') + '\\n');
@@ -102,6 +107,25 @@ const fixtureBundle = (manifest = FIXTURE_MANIFEST, extra = []) => zip([
 const BUNDLE_FILE = path.join(TMP, 'fixture-extension.mcpb');
 fs.mkdirSync(TMP, { recursive: true });
 fs.writeFileSync(BUNDLE_FILE, fixtureBundle());
+
+// A second bundle, whose manifest declares a list with a default — and a list of
+// secrets with a default. The default of the secret must never enter the page.
+const FORM_MANIFEST = {
+  manifest_version: '0.3',
+  name: 'Form Fixture Extension',
+  version: '0.1.0',
+  server: {
+    type: 'node',
+    entry_point: 'server.js',
+    mcp_config: { command: 'node', args: ['${__dirname}/server.js'] },
+  },
+  user_config: {
+    paths: { type: 'string', title: 'Paths', multiple: true, default: ['/tmp/one', '/tmp/two'] },
+    codes: { type: 'string', title: 'Codes', multiple: true, sensitive: true, default: ['s3cret-list-value'] },
+  },
+};
+const FORM_BUNDLE_FILE = path.join(TMP, 'form-extension.mcpb');
+fs.writeFileSync(FORM_BUNDLE_FILE, fixtureBundle(FORM_MANIFEST));
 
 // ---- helpers ---------------------------------------------------------------
 // An API call from Node. The server answers on localhost, so it goes through the same
@@ -305,41 +329,81 @@ function softData(bytes) {
   ok('a bundle with an absolute path is refused', absRes.status === 400, absRes.text.slice(0, 200));
 
   // ---- 8. the size limits ---------------------------------------------------
-  // The limits are checked on the bytes that are really produced, not on the numbers
-  // the bundle claims: a bundle that lies about its size is refused as well.
+  // Every limit has a case of its own, and every case trips that limit only: the data
+  // repeats a block, so it compresses about 110:1 and the ratio limit stays quiet.
   const LIM = zipReader.LIMITS;
   {
+    // The ratio (the zip bomb): 8 MB of zeros compress to 8 KB, so the bundle expands
+    // 1000:1. The bundle lies about the size in its directory — the ratio of the bytes
+    // that come out is what counts.
     const lying = zip([{ name: 'bomb.bin', data: Buffer.alloc(8 * 1024 * 1024, 0), opts: { declaredSize: 10 } }]);
     const r = unpack(lying);
-    ok('a bundle that lies about its size is refused', r.refused, r.msg);
-    ok('the refusal names the limit', /limit|bigger|big|expand/i.test(r.msg), r.msg);
-    ok('nothing is written from a bundle that lies about its size', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
+    ok('a bundle that expands too much is refused', r.refused, r.msg);
+    ok('the refusal names the zip bomb and not a size limit',
+      r.msg === '"bomb.bin" expands too much — refusing a zip bomb', r.msg);
+    ok('nothing is written from a bundle that expands too much', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
   }
   {
-    const lying = zip([{ name: 'big.bin', data: Buffer.alloc(21 * 1024 * 1024, 0), opts: { declaredSize: 10 } }]);
-    const r = unpack(lying);
-    ok('a file over the file limit is refused even when the bundle lies about its size', r.refused, r.msg);
-    ok('nothing is written from a file over the file limit', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
+    // The limit per file: one file of 21 MB. It is under the limit in total and its
+    // ratio is fine, so only the limit per file can fire.
+    const big = zip([{ name: 'big.bin', data: softData(21 * 1024 * 1024), opts: { declaredSize: 10 } }]);
+    const r = unpack(big);
+    ok('a file over the limit per file is refused', r.refused, r.msg);
+    ok('the refusal names the limit per file',
+      r.msg === '"big.bin" is bigger than the file limit (20971520 bytes)', r.msg);
+    ok('nothing is written from a file over the limit per file', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
   }
   {
-    // Three files of 17 MB: more than the 50 MB in total. The data repeats a block, so
-    // it compresses about 110:1 and the ratio limit does not fire — only the total does.
+    // The limit in total: three files of 17 MB. Every file is under the limit per
+    // file, so only the limit in total can fire.
     const three = [0, 1, 2].map((i) => ({ name: `f${i}.bin`, data: softData(17 * 1024 * 1024), opts: { declaredSize: 10 } }));
     const r = unpack(zip(three));
-    ok('a bundle over the total limit is refused even when the bundle lies about its size', r.refused, r.msg);
-    ok('nothing is written from a bundle over the total limit', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
+    ok('a bundle over the limit in total is refused', r.refused, r.msg);
+    ok('the refusal names the limit in total',
+      r.msg === 'The bundle is bigger than the size limit (52428800 bytes)', r.msg);
+    ok('nothing is written from a bundle over the limit in total', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
   }
   {
+    // The limit of the upload: the file itself is too big, before it is even read.
+    let refused = false, msg = '';
+    try { zipReader.readZip(Buffer.alloc(LIM.maxBundleBytes + 1)); } catch (e) { refused = true; msg = String(e.message || e); }
+    ok('a bundle over the limit of the upload is refused', refused, msg);
+    ok('the refusal names the limit of the upload',
+      msg === 'The bundle is bigger than the upload limit (20971520 bytes)', msg);
+  }
+  {
+    // The number of files in the bundle.
     const many = [];
     for (let i = 0; i < LIM.maxEntries + 1; i++) many.push({ name: `f${i}.txt`, data: 'x' });
     const r = unpack(zip(many));
-    ok('a bundle with too many files is refused', r.refused && /files|limit/i.test(r.msg), r.msg);
+    ok('a bundle with too many files is refused', r.refused, r.msg);
+    ok('the refusal names the number of files',
+      r.msg === 'The bundle has 2001 files (the limit is 2000)', r.msg);
     ok('nothing is written from a bundle with too many files', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
   }
   {
-    let refused = false, msg = '';
-    try { zipReader.readZip(Buffer.alloc(LIM.maxBundleBytes + 1)); } catch (e) { refused = true; msg = String(e.message || e); }
-    ok('a bundle over the upload limit is refused', refused && /limit|size/i.test(msg), msg);
+    // A bundle whose directory is fine but whose deflate stream is broken: the refusal
+    // has to name the broken stream, not the size limit.
+    const broken = zip([{ name: 'broken.bin', data: require('crypto').randomBytes(4000) }]);
+    const nameLen = broken.readUInt16LE(26);
+    const extraLen = broken.readUInt16LE(28);
+    broken[30 + nameLen + extraLen] = 0xff;   // an invalid deflate block
+    const r = unpack(broken);
+    ok('a bundle with a broken deflate stream is refused', r.refused, r.msg);
+    ok('the refusal names the broken stream and not the size limit',
+      !/file limit|size limit/i.test(r.msg) && /invalid|incorrect|deflate|zlib|data/i.test(r.msg), r.msg);
+    ok('nothing is written from a bundle with a broken deflate stream', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
+  }
+  {
+    // The name of an entry comes from the bundle: it must not put control characters
+    // or a whole book into the error message.
+    const nasty = zip([{ name: '../evil\u0007name.txt', data: 'x' }]);
+    const r = unpack(nasty);
+    ok('a bundle with a control character in the name is refused', r.refused, r.msg);
+    ok('the refusal has no control characters', !/[\x00-\x1f\x7f]/.test(r.msg), JSON.stringify(r.msg));
+    const long = zip([{ name: '../' + 'x'.repeat(300) + '\u0007', data: 'x' }]);
+    const r2 = unpack(long);
+    ok('the refusal shortens a long name', r2.refused && r2.msg.length < 200, JSON.stringify(r2.msg));
   }
   {
     const r = unpack(zip([{ name: 'link', data: '/etc/passwd', opts: { symlink: true } }]));
@@ -357,17 +421,23 @@ function softData(bytes) {
     // The same bundle, but over the API: nothing may be written either.
     const lying = zip([{ name: 'manifest.json', data: JSON.stringify(FIXTURE_MANIFEST) }, { name: 'bomb.bin', data: Buffer.alloc(8 * 1024 * 1024, 0), opts: { declaredSize: 10 } }]);
     const res = await call('POST', '/api/claude/extensions', { file: lying.toString('base64'), filename: 'lying.mcpb' });
-    ok('the server refuses a bundle that lies about its size', res.status === 400, res.text.slice(0, 200));
+    ok('the server refuses a bundle that expands too much', res.status === 400, res.text.slice(0, 200));
+    ok('the server names the zip bomb',
+      res.json.error === 'The bundle was refused: "bomb.bin" expands too much — refusing a zip bomb', res.json.error);
     const anyBomb = fs.existsSync(EXT_DIR) && fs.readdirSync(EXT_DIR).some((d) => fs.existsSync(path.join(EXT_DIR, d, 'bomb.bin')));
-    ok('nothing is written from a bundle that lies about its size', !anyBomb);
+    ok('nothing is written from a bundle that expands too much', !anyBomb);
   }
   {
     const big = zip([{ name: 'big.bin', data: Buffer.alloc(21 * 1024 * 1024, 7), store: true }]);
     const bigRes = await call('POST', '/api/claude/extensions', { file: big.toString('base64'), filename: 'big.mcpb' });
-    ok('a file that is too big is refused', bigRes.status === 400 && /limit|big/i.test(bigRes.json.error), bigRes.text.slice(0, 200));
+    ok('a bundle over the limit of the upload is refused by the server', bigRes.status === 400, bigRes.text.slice(0, 200));
+    ok('the server names the limit of the upload',
+      bigRes.json.error === 'The bundle was refused: The bundle is bigger than the upload limit (20971520 bytes)', bigRes.json.error);
     const bomb = zip([{ name: 'bomb.bin', data: Buffer.alloc(5 * 1024 * 1024, 0) }]);
     const bombRes = await call('POST', '/api/claude/extensions', { file: bomb.toString('base64'), filename: 'bomb.mcpb' });
-    ok('a bundle that expands too much is refused', bombRes.status === 400 && /expand|bomb|limit/i.test(bombRes.json.error), bombRes.text.slice(0, 200));
+    ok('a bundle that expands too much is refused by the server', bombRes.status === 400, bombRes.text.slice(0, 200));
+    ok('the server names the zip bomb',
+      bombRes.json.error === 'The bundle was refused: "bomb.bin" expands too much — refusing a zip bomb', bombRes.json.error);
   }
 
   // ---- 9. the extensions of Claude Desktop (by reference) --------------------
@@ -443,10 +513,25 @@ function softData(bytes) {
   await ev(`document.querySelector('#mcpList .mcp[data-id="${importedId}"] [data-a=log]').click(); 1`); await sleep(600);
   ok('the log viewer opens', await ev(`!!document.querySelector('#mcpLogsDlg') && document.querySelector('#mcpLogsDlg').open`));
   ok('the log viewer shows the output of the server', /lumen-test MCP server ready/.test(await ev(`document.querySelector('#logBox2').textContent`)), (await ev(`document.querySelector('#logBox2').textContent`)).slice(0, 120));
-  await ev(`document.querySelector('#logRefresh2').click(); 1`); await sleep(700);
-  ok('the log can be refreshed', await ev(`!!document.querySelector('#mcpLogsDlg') && document.querySelector('#mcpLogsDlg').open`));
-  ok('the refreshed log still shows the output', /lumen-test MCP server ready/.test(await ev(`document.querySelector('#logBox2').textContent`)), (await ev(`document.querySelector('#logBox2').textContent`)).slice(0, 120));
   await shot('step9-logs');
+
+  // A refresh has to fetch the log again. The fixture extension writes a line for every
+  // call, so the log grows while the dialog is open — that is what proves the refresh.
+  const extId = install.json.id;
+  await ev(`document.querySelector('#logClose2').click(); 1`); await sleep(200);
+  await call('PUT', `/api/mcp/${extId}/tools`, { disabled: [] });
+  await sleep(400);
+  await ev(`document.querySelector('#mcpList .mcp[data-id="${extId}"] [data-a=log]').click(); 1`); await sleep(700);
+  ok('the log of the extension is shown', /fixture extension ready/.test(await ev(`document.querySelector('#logBox2').textContent`)), (await ev(`document.querySelector('#logBox2').textContent`)).slice(0, 120));
+  const linesBefore = await ev(`document.querySelector('#logBox2').textContent.split('\\n').filter((l) => l.trim()).length`);
+  const echoCall = await call('POST', '/api/mcp/call', { server: extId, tool: 'echo', arguments: { value: 'refresh' } });
+  ok('the tool of the extension runs', echoCall.status === 200 && !(echoCall.json && echoCall.json.isError), echoCall.text.slice(0, 120));
+  await sleep(600);
+  await ev(`document.querySelector('#logRefresh2').click(); 1`); await sleep(900);
+  const linesAfter = await ev(`document.querySelector('#logBox2').textContent.split('\\n').filter((l) => l.trim()).length`);
+  const logText = await ev(`document.querySelector('#logBox2').textContent`);
+  ok('the log can be refreshed', linesAfter > linesBefore, `${linesBefore} lines before, ${linesAfter} lines after the refresh`);
+  ok('the refreshed log shows the new output', /lumen-test fixture tool called: echo/.test(logText), logText.slice(-200));
   await ev(`document.querySelector('#logClose2').click(); document.querySelector('#toolsClose').click(); 1`);
 
   // ---- 12. the extension asks before it runs on the computer -----------------
@@ -465,6 +550,21 @@ function softData(bytes) {
   ok('the extension asks before it runs on the computer', allConfirms.length > confirmsBefore && /trust|run this|only continue/i.test(lastConfirm), lastConfirm.slice(0, 200));
   ok('the question shows the command that will run', /server\.js/.test(lastConfirm) && /--token/.test(lastConfirm), lastConfirm.slice(0, 300));
   ok('the extension is installed after the confirmation', (await call('GET', '/api/mcp')).json.some((s) => (s.extension || {}).source === 'upload' && (s.extension || {}).id !== up.json.id));
+  await ev(`document.querySelector('#claudeClose').click(); 1`); await sleep(200);
+
+  // A list that is not a secret shows the default of the manifest. A list of secrets
+  // stays empty — its default is not shown in the form.
+  await ev(`document.querySelector('#toolsBtn').click(); 1`); await sleep(400);
+  await ev(`document.querySelector('#claudeImportBtn').click(); 1`); await sleep(600);
+  await setFiles('#extFile', [FORM_BUNDLE_FILE]);
+  await sleep(1500);
+  ok('the form of the second bundle is shown', await ev(`!!document.querySelector('#extFields [data-k="paths"]')`));
+  const pathsValue = await ev(`document.querySelector('#extFields [data-k="paths"]').value`);
+  ok('a list that is not a secret shows the default of the manifest', pathsValue === '/tmp/one\n/tmp/two', JSON.stringify(pathsValue));
+  const codesValue = await ev(`document.querySelector('#extFields [data-k="codes"]').value`);
+  const codesAttr = await ev(`document.querySelector('#extFields [data-k="codes"]').getAttribute('value')`);
+  ok('a list of secrets is empty in the form', codesValue === '' && codesAttr === null, JSON.stringify([codesValue, codesAttr]));
+  ok('the default of a secret is not shown in the form', !/s3cret-list-value/.test(await ev(`document.querySelector('#extForm').textContent`)), (await ev(`document.querySelector('#extForm').textContent`)).slice(0, 200));
   await ev(`document.querySelector('#claudeClose').click(); 1`); await sleep(200);
 
   // ---- 13. the env values of a server can be replaced, never read ------------

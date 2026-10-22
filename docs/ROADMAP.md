@@ -178,7 +178,7 @@ Fix round 2 (same branch, third commit — test harness only, no change to the s
 - **MCP logs and reload:** per-server stderr ring buffer at `GET /api/mcp/:id/logs`, a log viewer, and "Reload all".
 - Tests: fixture config + fixture `.mcpb` built in the test (zip with a tiny node MCP server); toggles remove a tool from the `tools` payload; placeholder substitution; path traversal in zip entries rejected; zip size limit.
 
-**Done** on branch `step-9-claude-import` (tests: `tests/step9-claude-import.js` — 126 assertions — plus `tests/lib/zipwrite.js`, a tiny zip writer for the fixtures; `tests/run.sh 9`).
+**Done** on branch `step-9-claude-import` (tests: `tests/step9-claude-import.js` — 145 assertions — plus `tests/lib/zipwrite.js`, a tiny zip writer for the fixtures; `tests/run.sh 9`).
 Handoff notes:
 
 - **New files:** `claude.js` (read-only access to Claude's config and extensions), `zip.js` (the bundle reader), `public/features/claudeimport.js` (the UI),
@@ -212,12 +212,18 @@ Handoff notes:
   **They are checked on the bytes that are really produced, not on the numbers the bundle claims:** the inflation is bounded
   (`zlib.inflateRawSync(raw, { maxOutputLength })`), the size of every file is measured after the inflation, the running total is the sum of the
   written bytes, and the sizes in the central directory are only a first filter. A bundle that lies about its size is therefore refused as well.
-  (The bounded inflation needs **Node 22+** — `package.json` now says so.)
+  (The `maxOutputLength` of `zlib` has been there since Node v12.19.0/v14.5.0 — the **Node 22+** floor of `package.json` is a support
+  choice, not a technical need: 22 is the current LTS, 18 and 20 are end-of-life.)
+  **Every refusal names the limit that fired** — the limit per file, the limit in total, the limit of the upload, the number of files or the
+  compression ratio are five different messages. A bundle whose compressed stream is broken is reported as broken (the error of `zlib` is passed on),
+  not as a file that is too big. The name of an entry comes from the bundle, so it is stripped of control characters and shortened before it goes
+  into an error message.
   Uploaded bundles are unpacked into `data/extensions/<uuid>`; an extension of Claude Desktop is imported **by reference** (its folder is never copied
   into Lumen and never written to).
 - **Manifests** are v0.3 (`manifest_version: "0.3"`); anything else is refused. `user_config` supports the types `directory`, `file`, `string`, `number`
   and `boolean` with `required`, `multiple` and `sensitive`; sensitive fields are password fields and **their default never enters the page** (an
-  empty field means "use the default"). The placeholders `${__dirname}`, `${HOME}` and `${user_config.key}` are substituted; an argument that is
+  empty field means "use the default"). A list that is not a secret shows the default of the manifest in its textarea; a list of secrets stays empty.
+  The placeholders `${__dirname}`, `${HOME}` and `${user_config.key}` are substituted; an argument that is
   exactly a `${user_config.key}` of a list becomes one argument per value. A `binary` extension runs the file itself — it is never its own first
   argument.
 - **Logs and reload.** `mcp.js` keeps the last 200 stderr lines per server (`GET /api/mcp/:id/logs`), the Tools dialog has a viewer (≡) per server and
@@ -226,6 +232,10 @@ Handoff notes:
   `tests/run.sh` sets both. The test also asserts that Claude's config file is byte-for-byte unchanged after the import.
 - Not covered by the tests: a real `.mcpb` from the Claude app (the fixture is built by the test), an extension in another language than node, and the
   Windows and Linux config paths (the path is chosen per OS in `claude.js`, but the test runs on macOS).
+- **Known gap (found in the fix round 2, not fixed there):** the answer of `POST /api/claude/extensions` carries the `default` of a **sensitive** field of
+  the manifest. The form does not show it (an empty field means "use the default"), but the value is in the JSON of the answer, so a manifest that
+  declares a secret as a default puts that secret into the browser. The fix belongs in the route that answers the browser — leave the `default` of a
+  sensitive field out of that answer. The server keeps it: the install reads the manifest itself, so an empty field still means "use the default".
 
 ### Step 10: Skills
 - A skill is a folder with `SKILL.md` (YAML frontmatter `name`, `description`) plus optional files, stored in `data/skills/<name>/`. 30 MB limit.
