@@ -7,6 +7,9 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { zip } = require('./lib/zipwrite');
+// The skills of the server are also called directly, where the server has no route for
+// them (the starter skills are installed when the server starts).
+const skillsModule = require('../skills.js');
 
 const TMP = process.env.LUMEN_TEST_TMP || path.join(os.tmpdir(), 'lumen-tests');
 const BASE = 'http://localhost:3101';
@@ -660,6 +663,91 @@ const MODEL_SYS = [
     ok('a skill can be deleted from the browser', b.gone === 200, String(b.gone));
     ok('a body that is not JSON is refused in the browser too', b.notJson === 415, String(b.notJson));
     ok('the skill of the browser is really gone', !fs.existsSync(path.join(SKILLS_DIR, 'browser-skill')));
+  }
+
+  // ---- 22. every path of a skill stays inside the skills folder ----------------
+  // The list, the tools and the files of a skill are all held against the real path of
+  // data/skills/. The folder of the skill itself is a path too: a skill folder that is
+  // a symlink to a folder outside is not a skill, and nothing may be read from it or
+  // written into it.
+  {
+    // A folder outside the skills, and a skill folder that is a symlink to it.
+    const outside = path.join(TMP, 'outside-skill-2');
+    fs.rmSync(outside, { recursive: true, force: true });
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'SKILL.md'), '---\nname: linked-2\ndescription: A skill outside the skills.\n---\n\nOUTSIDE CONTENT\n');
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'SECRET OUTSIDE CONTENT');
+    const linkDir = path.join(SKILLS_DIR, 'linked-2');
+    try { fs.unlinkSync(linkDir); } catch { /* not there */ }
+    fs.symlinkSync(outside, linkDir, 'dir');
+
+    // The SKILL.md of a symlinked skill folder cannot be written.
+    const put = await call('PUT', '/api/skills/linked-2', { content: 'PWNED BY UPDATE' });
+    ok('a PUT of a SKILL.md on a symlinked skill folder is refused', put.status >= 400 && put.status < 500, put.text.slice(0, 200));
+    ok('nothing was written outside the skills',
+      fs.readFileSync(path.join(outside, 'SKILL.md'), 'utf8').indexOf('PWNED BY UPDATE') === -1,
+      fs.readFileSync(path.join(outside, 'SKILL.md'), 'utf8').slice(0, 100));
+
+    // A symlinked skill folder cannot be read either: the file names and the sizes of
+    // the folder outside would be a leak. The choice here is a refusal, not an empty
+    // answer.
+    const get = await call('GET', '/api/skills/linked-2');
+    ok('a GET of a symlinked skill folder is refused', get.status >= 400 && get.status < 500, get.text.slice(0, 200));
+    ok('the files of the folder outside are not given', !/secret\.txt/.test(get.text), get.text.slice(0, 200));
+
+    // A skill cannot be created under a name that is a symlink: the folder is not there
+    // yet, so the parent is proved and the name itself is refused.
+    const broken = path.join(SKILLS_DIR, 'broken-link-2');
+    try { fs.unlinkSync(broken); } catch { /* not there */ }
+    fs.symlinkSync(path.join(outside, 'not-there'), broken);
+    const made = await call('POST', '/api/skills', { name: 'broken-link-2', content: 'PWNED BY CREATE' });
+    ok('a skill cannot be created under a symlinked name', made.status >= 400 && made.status < 500, made.text.slice(0, 200));
+    ok('the refusal names the symlink', /symlink/i.test(made.text), made.text.slice(0, 200));
+    ok('nothing was created outside the skills', !fs.existsSync(path.join(outside, 'not-there')));
+    ok('the symlink is still a symlink', fs.lstatSync(broken).isSymbolicLink());
+
+    // The starter skills are copied into the data folder when the server starts: a
+    // starter folder that is a symlink is not written into either.
+    const starterRoot = path.join(TMP, 'starter-root');
+    const starterOutside = path.join(TMP, 'outside-starter');
+    fs.rmSync(starterRoot, { recursive: true, force: true });
+    fs.rmSync(starterOutside, { recursive: true, force: true });
+    fs.mkdirSync(starterRoot, { recursive: true });
+    fs.mkdirSync(starterOutside, { recursive: true });
+    fs.symlinkSync(starterOutside, path.join(starterRoot, 'summarise'), 'dir');
+    skillsModule.ensureStarters(starterRoot, { skills: {} });
+    ok('nothing was copied outside the skills', fs.readdirSync(starterOutside).length === 0, fs.readdirSync(starterOutside).join(','));
+    ok('the symlinked starter folder is left alone', fs.lstatSync(path.join(starterRoot, 'summarise')).isSymbolicLink());
+    ok('the other starter is still installed', fs.existsSync(path.join(starterRoot, 'explain', 'SKILL.md')),
+      fs.existsSync(starterRoot) ? fs.readdirSync(starterRoot).join(',') : 'no folder');
+  }
+
+  // ---- 23. the backup of a replaced skill is swept away at the start ------------
+  // The folder of the old skill is moved aside when a bundle replaces it. A crash in
+  // between leaves the backup behind: if the skill is there, the backup is a leftover
+  // and goes; if the skill is not there, the backup is the skill and is put back.
+  {
+    const skillDir = path.join(SKILLS_DIR, 'sweep-keep');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: sweep-keep\ndescription: The skill that stays.\n---\n\nKEEP\n');
+    const backupKeep = path.join(SKILLS_DIR, 'sweep-keep.old-11111111-2222-3333-4444-555555555555');
+    fs.mkdirSync(backupKeep, { recursive: true });
+    fs.writeFileSync(path.join(backupKeep, 'SKILL.md'), '---\nname: sweep-keep\ndescription: The old skill.\n---\n\nOLD\n');
+    const backupGone = path.join(SKILLS_DIR, 'sweep-restore.old-11111111-2222-3333-4444-666666666666');
+    fs.mkdirSync(backupGone, { recursive: true });
+    fs.writeFileSync(path.join(backupGone, 'SKILL.md'), '---\nname: sweep-restore\ndescription: The skill that was put back.\n---\n\nRESTORED\n');
+
+    const s3 = await startServer(3196);
+    ok('the server starts again', s3.ok, 'the second server did not come up');
+    ok('the leftover of a replaced skill is swept away', !fs.existsSync(backupKeep), fs.readdirSync(SKILLS_DIR).join(','));
+    ok('the skill itself is still there', fs.existsSync(path.join(skillDir, 'SKILL.md')));
+    ok('a backup without a skill is put back', fs.existsSync(path.join(SKILLS_DIR, 'sweep-restore', 'SKILL.md')),
+      fs.readdirSync(SKILLS_DIR).join(','));
+    ok('the backup that was put back is gone', !fs.existsSync(backupGone), fs.readdirSync(SKILLS_DIR).join(','));
+    const restored = await s3.call('GET', '/api/skills/sweep-restore');
+    ok('the skill that was put back is a skill of the user', restored.status === 200 && /RESTORED/.test((restored.json || {}).content || ''),
+      restored.text.slice(0, 200));
+    s3.stop();
   }
 
   h.close();

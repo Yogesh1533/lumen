@@ -281,20 +281,23 @@ Handoff notes:
   the old skill back.
 - **The name is a folder name**, so it must match `^[a-z0-9][a-z0-9_-]{0,39}$` — no slashes, no dots, no `..`, no spaces, at most 40 characters. A path inside a skill may
   not be absolute, may not hold `..`, and **a symlink is never used** — not the file itself and not a folder on the way to it. Every path is held against the **real
-  path of `data/skills/`** (not against the folder of the skill, which may itself be a symlink) and every segment of the path is checked with `lstat` on the write and
-  the delete path, so a symlinked folder inside a skill cannot redirect a write or a delete out of it.
+  path of `data/skills/`** (not against the folder of the skill, which may itself be a symlink) and every segment of the path is checked with `lstat` on **every**
+  path of a skill — the read, the write, the delete and the copy — so a symlinked folder inside a skill cannot redirect a write or a delete out of it, and a skill
+  folder that is a symlink to a folder outside is not a skill at all: nothing is read from it, nothing is written into it, and the starter skills are not copied into it.
 - **The tools are read-only.** `use_skill` returns the body of the `SKILL.md` and the list of the files; `read_skill_file` returns one text file (at most 1 MB **of
   bytes**, counted with `Buffer.byteLength` — the file is cut off on the disk, not read whole — and the answer says that it was cut off). Neither writes, deletes nor
   runs anything. A skill that is switched off is refused by both and is not in the system prompt.
 - **The system prompt** lists only the enabled skills, with their names and their one-line description, and the block says that the text of a skill is material the user
-  installed on this computer — not an instruction of Lumen.
+  installed on this computer — not an instruction of Lumen. A **Temporary chat still sends the enabled skills to the model**, the same way it sends the files of a
+  project: the invariant of section 2 covers the **memory** only, and a skill is not memory.
 - **The starter skills** are copied into `data/skills/` on the first run and are **never overwritten** (the user may have edited them). A starter that the user
   **deleted** stays deleted: the name keeps a tombstone in the settings (`settings.skills[name].removed = true`, and `enabled = false`), `ensureStarters()` skips it
   and the list of the skills does not show it. A new skill with the same name clears the tombstone.
 - **The skills server appears only while a skill is switched on** (like the web server, which appears when the web tools are on). With every skill off, Lumen sends
   no skills tool to the model at all and the server is not in the list of the servers.
-- **The built-in Skills server changes what the earlier steps' tests see.** It is always in the list of the servers (`GET /api/mcp`), so the list is never
-  empty any more and the header badge counts 2 tools more. Three assertions of the earlier steps were therefore changed (the same run on the base commit
+- **The built-in Skills server changes what the earlier steps' tests see.** It is in the list of the servers (`GET /api/mcp`) **while at least one skill is
+  switched on** — with every skill off it is not there at all (see the bullet above), so the list of the servers is as it was before, and the header badge counts
+  2 tools more while the server is there. Three assertions of the earlier steps were therefore changed (the same run on the base commit
   `f8c05f7` is green without them): `tests/step5-styles-memory.js` — "Normal adds nothing" now asks that the *style* adds no text (the skills block is in the
   prompt); `tests/step6-mcp-tools.js` — the test server is looked up by its name and not by its place in the list, and the badge is 3 + 2 = 5;
   `tests/step7-desktop-polish.js` — the web server is looked up by its id (`builtin`), because the Skills server is built in as well.
@@ -332,6 +335,24 @@ Handoff notes:
   for the card: step 3 was the next step that hung on it, and it uses the harness now. The assertions of the earlier steps did not change.
 - The skills API is also called **from the page itself** (the browser's own `fetch`, with the browser's own Host/Origin/Sec-Fetch-Site headers), so `guard()` is exercised the
   way a request of the user goes through it. The other calls of the test come from Node with the headers a browser sends.
+
+**Fix round 2** (the review of the fix round 1; the changes are in the commit after `2c9ffa2`):
+
+- **Every path of a skill is contained — the read, the write, the delete and the copy.** The folder of the skill is a path too: `skills.skillFolder()` (in
+  `skills.js`) is the one place that proves it. A skill folder that is a symlink is refused (`"A symlink is not used"`), and the real path of the folder must be
+  inside the real path of `data/skills/`. `read()` (the `GET /api/skills/:name`), `update()` (`PUT`), `create()` (`POST`), `remove()`, `addFile()`, `removeFile()`,
+  `extract()` and `mustExist()` (the tools of the model) all go through it, and so do `list()` and `anyEnabled()`, which skip a symlinked folder.
+- **A `SKILL.md` that is a symlink is never written** (`skills.skillMdPath()`): the write would follow it out of the folder of the skill.
+- **A name that is not there is not trusted because it does not exist.** `create()` proves the parent (the folder of the skills) and refuses the name itself when
+  it is a symlink; a folder that is made is proved again before the `SKILL.md` is written into it.
+- **The starter skills are not copied into a symlinked folder** (`ensureStarters()`): the folder is proved before the copy, and a folder that is a symlink is
+  left alone.
+- **The backup of a replaced skill is swept away at the start** (`sweepStaging()`): the old folder of a skill is moved aside as `<name>.old-<uuid>` while a bundle
+  replaces it, and a crash in between leaves that folder behind. If the skill is there, the backup is a leftover and goes; if the skill is not there, the backup
+  **is** the skill and it is put back. The sweep runs **before** the starter skills are installed, so a skill that was put back is not overwritten by a starter.
+- **A Temporary chat still sends the enabled skills to the model**, the same way it sends the files of a project. The invariant of section 2 covers the
+  **memory** only, and a skill is not memory. The sentence is in `README.md` (the skills bullet) and in the step-10 notes above.
+- The sentence "it is always in the list of the servers" was wrong (the Skills server is hidden while no skill is on) and now agrees with the code.
 
 ### Step 11: Side Chat and Split View
 - **Side Chat:** right panel with its own thread seeded with a snapshot of the main conversation ("answer briefly; this is a side question"); never modifies the main chat;

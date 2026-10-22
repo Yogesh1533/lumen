@@ -81,6 +81,11 @@ const insideRoot = (root, p) => {
 // the skills — not inside the folder of the skill, which may itself be a symlink.
 function safeInside(root, dir, rel) {
   const base = path.resolve(dir);
+  // The folder of the skill is a segment of the path too: a symlink in the way is
+  // refused, never followed.
+  let bst = null;
+  try { bst = fs.lstatSync(base); } catch { bst = null; }
+  if (bst && bst.isSymbolicLink()) throw new Error('A symlink is not used');
   let realBase = null;
   try { realBase = fs.realpathSync(base); } catch { realBase = null; }
   if (!realBase) throw new Error('There is no skill called "' + path.basename(base) + '"');
@@ -96,6 +101,51 @@ function safeInside(root, dir, rel) {
   try { real = fs.realpathSync(cur); } catch { real = null; }
   if (real && !insideRoot(root, real)) throw new Error('That path would leave the folder of the skills');
   return { base, target: cur };
+}
+// The folder of a skill. The folder is a path too: it must be a real folder inside the
+// real root of the skills. A symlink in the way is refused, and the real path of the
+// folder must stay inside the real root of the skills. A folder that is not there yet
+// is not trusted because it does not exist: the parent is proved instead, and the name
+// itself is refused when it is a symlink.
+function skillFolder(root, name, opts) {
+  opts = opts || {};
+  const dir = skillDir(root, name);
+  let st = null;
+  try { st = fs.lstatSync(dir); } catch { st = null; }
+  // A symlink in the way is never used, not even when it points inside the skills.
+  if (st && st.isSymbolicLink()) throw new Error('A symlink is not used');
+  if (!st) {
+    if (!opts.create) throw new Error('There is no skill called "' + name + '"');
+    // The folder of the skills is Lumen's own: it is made when it is not there yet.
+    try { fs.mkdirSync(root, { recursive: true }); } catch { /* the folder cannot be made */ }
+    // The folder is not there yet: the parent is proved, so that a folder that is made
+    // later cannot land outside the real root.
+    const parent = path.dirname(dir);
+    let pst = null;
+    try { pst = fs.statSync(parent); } catch { pst = null; }
+    if (!pst || !pst.isDirectory()) throw new Error('There is no folder of skills');
+    let realParent = null;
+    try { realParent = fs.realpathSync(parent); } catch { realParent = null; }
+    if (!realParent || !insideRoot(root, realParent)) throw new Error('That path would leave the folder of the skills');
+    return { dir, exists: false };
+  }
+  if (!st.isDirectory()) {
+    throw new Error(opts.create ? 'There is already a skill called "' + name + '"' : 'There is no skill called "' + name + '"');
+  }
+  // The real path of the folder must be inside the real root of the skills.
+  let real = null;
+  try { real = fs.realpathSync(dir); } catch { real = null; }
+  if (!real || !insideRoot(root, real)) throw new Error('That path would leave the folder of the skills');
+  return { dir, exists: true };
+}
+// The SKILL.md of a skill. A SKILL.md that is a symlink is never written: the write
+// would follow it out of the folder of the skill.
+function skillMdPath(root, dir) {
+  const p = path.join(dir, 'SKILL.md');
+  let st = null;
+  try { st = fs.lstatSync(p); } catch { st = null; }
+  if (st && st.isSymbolicLink()) throw new Error('A symlink is not used');
+  return p;
 }
 // The SKILL.md of a skill. A symlink is never read.
 function readSkillMd(root, dir) {
@@ -164,8 +214,9 @@ function list(root, settings) {
     if (isRemoved(settings, name)) continue; // a deleted skill stays deleted
     const dir = skillDir(root, name);
     let st;
-    try { st = fs.statSync(dir); } catch { continue; }
-    if (!st.isDirectory()) continue;
+    try { st = fs.lstatSync(dir); } catch { continue; }
+    // A symlink is never a skill, not even when it points inside the skills.
+    if (!st.isDirectory() || st.isSymbolicLink()) continue;
     // A skill folder that is a symlink to a folder outside the skills is not a skill.
     let realDir = null;
     try { realDir = fs.realpathSync(dir); } catch { realDir = null; }
@@ -193,6 +244,10 @@ function anyEnabled(root, settings) {
     if (!isEnabled(settings, name)) continue;
     const dir = skillDir(root, name);
     if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
+    // A symlink is never a skill, not even when it points inside the skills.
+    let ast = null;
+    try { ast = fs.lstatSync(dir); } catch { ast = null; }
+    if (!ast || !ast.isDirectory() || ast.isSymbolicLink()) continue;
     // A skill folder that is a symlink to a folder outside the skills is not a skill.
     let realDir = null;
     try { realDir = fs.realpathSync(dir); } catch { realDir = null; }
@@ -205,8 +260,11 @@ function anyEnabled(root, settings) {
 function read(root, settings, name) {
   name = asName(name);
   if (!validName(name)) throw new Error(nameError);
-  const dir = skillDir(root, name);
-  if (!fs.existsSync(path.join(dir, 'SKILL.md'))) throw new Error('There is no skill called "' + name + '"');
+  // The folder of the skill is a path too: a skill folder that is a symlink is not a
+  // skill, and the file names of the folder outside are never given.
+  const { dir } = skillFolder(root, name);
+  const md = skillMdPath(root, dir);
+  if (!fs.existsSync(md)) throw new Error('There is no skill called "' + name + '"');
   const content = readSkillMd(root, dir);
   const files = walk(dir);
   return {
@@ -218,12 +276,16 @@ function read(root, settings, name) {
 function create(root, settings, body) {
   const name = asName(body && body.name).trim();
   if (!validName(name)) throw new Error(nameError);
-  const dir = skillDir(root, name);
+  // The name is proved before anything is written: a name that is a symlink is refused,
+  // and a name that is not there is not trusted because it does not exist.
+  const { dir } = skillFolder(root, name, { create: true });
   if (fs.existsSync(dir)) throw new Error('There is already a skill called "' + name + '"');
   const content = typeof (body && body.content) === 'string' ? body.content : defaultSkillMd(name);
   if (Buffer.byteLength(content) > MAX_BYTES) throw new Error('The SKILL.md is bigger than the limit of 30 MB (' + MAX_BYTES + ' bytes)');
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'SKILL.md'), content, { mode: 0o600 });
+  // The folder that was made is proved again: only then is the SKILL.md written.
+  skillFolder(root, name);
+  fs.writeFileSync(skillMdPath(root, dir), content, { mode: 0o600 });
   // A name that was deleted before is a new skill now: the tombstone goes.
   if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
   settings.skills[name] = { enabled: true };
@@ -233,13 +295,16 @@ function create(root, settings, body) {
 function update(root, settings, name, body) {
   name = asName(name);
   if (!validName(name)) throw new Error(nameError);
-  const dir = skillDir(root, name);
-  if (!fs.existsSync(path.join(dir, 'SKILL.md'))) throw new Error('There is no skill called "' + name + '"');
+  const { dir } = skillFolder(root, name);
+  // A SKILL.md that is a symlink is never written: the write would follow it out of
+  // the folder of the skill.
+  const md = skillMdPath(root, dir);
+  if (!fs.existsSync(md)) throw new Error('There is no skill called "' + name + '"');
   if (body && typeof body.content === 'string') {
     const others = walk(dir).filter((f) => f.path !== 'SKILL.md');
     const size = Buffer.byteLength(body.content);
     if (folderSize(others) + size > MAX_BYTES) throw new Error('The skill would be bigger than the limit of 30 MB (' + MAX_BYTES + ' bytes)');
-    fs.writeFileSync(path.join(dir, 'SKILL.md'), body.content, { mode: 0o600 });
+    fs.writeFileSync(md, body.content, { mode: 0o600 });
   }
   if (body && typeof body.enabled === 'boolean') setEnabled(settings, name, body.enabled);
   return read(root, settings, name);
@@ -249,8 +314,7 @@ function update(root, settings, name, body) {
 function remove(root, settings, name) {
   name = asName(name);
   if (!validName(name)) throw new Error(nameError);
-  const dir = skillDir(root, name);
-  if (!fs.existsSync(dir)) throw new Error('There is no skill called "' + name + '"');
+  const { dir } = skillFolder(root, name);
   fs.rmSync(dir, { recursive: true, force: true });
   markRemoved(settings, name);
   return { ok: true };
@@ -259,8 +323,7 @@ function remove(root, settings, name) {
 function addFile(root, settings, name, relPath, buf) {
   name = asName(name);
   if (!validName(name)) throw new Error(nameError);
-  const dir = skillDir(root, name);
-  if (!fs.existsSync(dir)) throw new Error('There is no skill called "' + name + '"');
+  const { dir } = skillFolder(root, name);
   const rel = safeRel(relPath);
   if (!rel) throw new Error('That is not a valid path inside a skill');
   const { target } = safeInside(root, dir, rel);
@@ -274,8 +337,7 @@ function addFile(root, settings, name, relPath, buf) {
 function removeFile(root, settings, name, relPath) {
   name = asName(name);
   if (!validName(name)) throw new Error(nameError);
-  const dir = skillDir(root, name);
-  if (!fs.existsSync(dir)) throw new Error('There is no skill called "' + name + '"');
+  const { dir } = skillFolder(root, name);
   const rel = safeRel(relPath);
   if (!rel) throw new Error('That is not a valid path inside a skill');
   const { target } = safeInside(root, dir, rel);
@@ -315,11 +377,16 @@ function extract(root, settings, name, buf) {
     const size = folderSize(walk(src));
     if (size > MAX_BYTES) throw new Error('The skill would be bigger than the limit of 30 MB (' + MAX_BYTES + ' bytes)');
     const dir = skillDir(root, name);
+    // A skill folder that is a symlink is not a skill: a bundle never replaces it, and
+    // the folder outside is never touched.
+    let dst = null;
+    try { dst = fs.lstatSync(dir); } catch { dst = null; }
+    if (dst && dst.isSymbolicLink()) throw new Error('A symlink is not used');
     // The old folder is moved aside first and only deleted when the new one is in
     // place: a bundle that fails on the way leaves the skill of the user untouched.
     const backup = dir + '.old-' + crypto.randomUUID();
     let hadOld = false;
-    if (fs.existsSync(dir)) { fs.renameSync(dir, backup); hadOld = true; }
+    if (dst) { fs.renameSync(dir, backup); hadOld = true; }
     try {
       fs.mkdirSync(path.dirname(dir), { recursive: true });
       fs.renameSync(src, dir);
@@ -327,6 +394,9 @@ function extract(root, settings, name, buf) {
       if (hadOld) { try { fs.renameSync(backup, dir); } catch { /* the old folder stays where it is */ } }
       throw e;
     }
+    // The new folder is proved before the old one is deleted: it must be a real folder
+    // inside the real root of the skills.
+    skillFolder(root, name);
     if (hadOld) { try { fs.rmSync(backup, { recursive: true, force: true }); } catch { /* nothing to clean */ } }
   } finally {
     // Nothing of a refused bundle stays on the disk.
@@ -352,9 +422,15 @@ function ensureStarters(root, settings) {
   for (const name of names) {
     if (!validName(name)) continue;
     if (settings && isRemoved(settings, name)) continue;
-    const src = path.join(STARTER_DIR, name), dir = skillDir(root, name);
+    const src = path.join(STARTER_DIR, name);
+    // The folder of the starter is a path too: a starter folder that is a symlink is
+    // not written into, and the folder outside is never touched.
+    let dir;
+    try { dir = skillFolder(root, name, { create: true }).dir; } catch { continue; }
     if (fs.existsSync(path.join(dir, 'SKILL.md'))) continue; // the user may have edited it
     fs.mkdirSync(dir, { recursive: true });
+    // The folder that was made is proved again before the starter is copied into it.
+    try { skillFolder(root, name); } catch { continue; }
     for (const f of walk(src)) {
       const target = path.join(dir, ...f.path.split('/'));
       fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -362,13 +438,32 @@ function ensureStarters(root, settings) {
     }
   }
 }
-// The folders of the uploads that a crash left behind are swept away at the start.
-function sweepStaging(root) {
+// The leftovers of an upload that a crash left behind are swept away at the start: the
+// staging folder of a bundle, and the backup folder of a skill that was replaced. If
+// the skill is there, the backup is a leftover and goes; if the skill is not there,
+// the backup is the skill, and it is put back.
+function sweepStaging(root, settings) {
   let names = [];
   try { names = fs.readdirSync(root); } catch { return; }
   for (const n of names) {
-    if (!n.startsWith('.staging-')) continue;
-    try { fs.rmSync(path.join(root, n), { recursive: true, force: true }); } catch { /* nothing to clean */ }
+    if (n.startsWith('.staging-')) {
+      try { fs.rmSync(path.join(root, n), { recursive: true, force: true }); } catch { /* nothing to clean */ }
+      continue;
+    }
+    // The backup of a replaced skill: "<name>.old-<uuid>".
+    const m = n.match(/^([a-z0-9][a-z0-9_-]{0,39})\.old-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    if (!m) continue;
+    const name = m[1];
+    const dir = path.join(root, name);
+    let st = null;
+    try { st = fs.lstatSync(dir); } catch { st = null; }
+    if (st || (settings && isRemoved(settings, name))) {
+      // The skill is there (or the user deleted it): the backup is a leftover and goes.
+      try { fs.rmSync(path.join(root, n), { recursive: true, force: true }); } catch { /* nothing to clean */ }
+    } else {
+      // The skill is not there: the backup is the skill, and it is put back.
+      try { fs.renameSync(path.join(root, n), dir); } catch { /* it stays where it is */ }
+    }
   }
 }
 
@@ -396,14 +491,12 @@ function tools() {
 function mustExist(root, settings, name) {
   name = asName(name);
   if (!validName(name)) throw new Error(nameError);
-  const dir = skillDir(root, name);
-  if (!fs.existsSync(path.join(dir, 'SKILL.md'))) throw new Error('There is no skill called "' + name + '"');
-  if (!isEnabled(settings, name)) throw new Error('The skill "' + name + '" is switched off in Lumen');
   // The folder of the skill must be a real folder inside the skills: a skill folder that
   // is a symlink to a folder outside is not a skill of the user.
-  let realDir = null;
-  try { realDir = fs.realpathSync(dir); } catch { realDir = null; }
-  if (!realDir || !insideRoot(root, realDir)) throw new Error('That path would leave the folder of the skills');
+  const { dir } = skillFolder(root, name);
+  const md = skillMdPath(root, dir);
+  if (!fs.existsSync(md)) throw new Error('There is no skill called "' + name + '"');
+  if (!isEnabled(settings, name)) throw new Error('The skill "' + name + '" is switched off in Lumen');
   const content = readSkillMd(root, dir);
   return { name, dir, content, description: describe(content) };
 }

@@ -37,11 +37,13 @@ try { const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); settings
 if (!settings.toolToggles || typeof settings.toolToggles !== 'object') settings.toolToggles = {};
 if (!settings.extensions || typeof settings.extensions !== 'object') settings.extensions = {};
 if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
+// The leftovers of an upload that a crash left behind are swept away first: the backup
+// of a skill that was replaced is put back, and the starter skills are only installed
+// where there is no skill of the user.
+skills.sweepStaging(SKILLS_DIR, settings);
 // The starter skills are copied into the data folder on the first run. A skill that the
 // user has edited is never overwritten, and a skill that the user deleted stays deleted.
 skills.ensureStarters(SKILLS_DIR, settings);
-// The folders of the uploads that a crash left behind are swept away.
-skills.sweepStaging(SKILLS_DIR);
 const timers = new Map();
 // A small ring buffer of the server's own log lines, shown in Settings > Troubleshooting.
 const LOG_MAX = 300;
