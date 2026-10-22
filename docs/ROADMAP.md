@@ -22,7 +22,12 @@ a skill is a folder with a `SKILL.md`; a Skills dialog (list, switch on and off,
 upload a zip or loose files, delete), two starter skills, the skills tools `use_skill` and
 `read_skill_file`, and the enabled skills in the system prompt.
 
-**Next: steps 11 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 11 (side chat and split view) is built, tested and committed on branch `step-11-side-split` (not merged yet):
+a side chat in a panel of its own (its own chat record, seeded with a bounded snapshot of the main
+conversation, "Insert into chat" puts the answer into the main chat), a split view whose second pane
+is Lumen itself in an embed mode, and a cross-pane refresh over a BroadcastChannel.
+
+**Next: steps 12 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -376,6 +381,43 @@ Handoff notes:
 - **Split View:** second pane is an `<iframe src="/?embed=1&chat=ID">` of Lumen itself (same origin, separate JS state, shared server data). Add an `embed` mode (no sidebar, compact header)
   and cross-pane refresh over `BroadcastChannel`. This avoids refactoring the global state in `app.js`. Side Chat can reuse the same embed mechanism.
 - Tests: two panes stream independently; side chat leaves main messages unchanged; insert works; embed mode layout; sidebar refresh across panes.
+
+**Done** on branch `step-11-side-split` (tests: `tests/step11-side-split.js` — 55 assertions; `tests/run.sh 11`).
+Handoff notes:
+
+- **New file:** `public/features/splitview.js` (the whole feature: the embed mode, the channel, the side chat, the split view).
+  `public/index.html` grew the two panels (`#sidePane` with `#sideFrame`, `#splitPane` with `#splitFrame`), the two header buttons
+  (`#sideChatBtn`, `#splitBtn`) and the script tag; `public/style.css` grew the rules of the panels and of the embed mode.
+  `server.js` was **not** touched: there is no new route, nothing new is exposed.
+- **The embed pane is Lumen itself and it is not sandboxed.** `#sideFrame` and `#splitFrame` have **no `sandbox` attribute at all**
+  (the sandbox flag that would give a frame the origin of the app does not appear anywhere in the diff). The pane is a full user of the app: it sends messages, it uses
+  tools, it approves tool calls. The artifact preview is a different element (`#artFrame`) and keeps its own sandbox
+  (`sandbox="allow-scripts allow-forms"`, an opaque origin) — the step-2 tests still pass unweakened.
+- **The embed mode is a mode of the same page**, not a second app: `?embed=1` puts the class `embed` on `<body>` (no sidebar, a compact
+  header) and `?chat=ID` opens that chat. There is no `app-embed.js` and no second copy of the app.
+- **A pane keeps the chat of its own address.** The `openChat` of the app is wrapped in the embed mode: it opens the chat of the query
+  string and nothing else, so the "continue the last chat" switch and the restored chat tabs of the app cannot drag the pane to another
+  conversation. The user can still point the pane at any chat with the picker in the compact header (that one call is allowed), and the
+  command palette hides the chats of the user in a pane.
+- **A chat that does not exist does not break a pane:** `?chat=ID` with an unknown id falls back to a new chat and the normal empty state.
+- **The side chat is a chat record of its own** (`POST /api/chats` with the seed as its first message) and it never writes to the main chat.
+  The only way into the main chat is the "Insert into chat" button: it adds a **message of the user** with the marker
+  `[Side chat] <title>` and lets the normal `persist()` save it — no new route, no direct write into the store.
+- **The snapshot is bounded and says so.** The seed holds the last 20 messages of the main chat (oldest first) and at most 20,000 characters
+  in all; the cap is written into the seed itself ("at most 20 messages and 20,000 characters go into the snapshot … 12 of 20 messages and
+  18,675 of 20,000 characters are shown here"), between `--- begin snapshot ---` and `--- end snapshot ---`.
+- **One BroadcastChannel for the whole app** (`lumen`). A pane posts `list` when the list of chats changed (created, renamed, deleted,
+  pinned, moved) and `messages` when the messages of a chat changed. The fingerprint of the list is order-independent, so a pane that
+  refreshes because of another pane does not post about that refresh — the panes cannot spin (the test watches the counter of the
+  received messages). A browser without `BroadcastChannel` has no cross-pane refresh and no error. A lone pane behaves exactly as before.
+- **The second pane of the split view gets a conversation of its own** (`/?embed=1`), not the chat of the main window: the app saves the
+  whole list of messages of a chat every time, so two panes that write the same chat would take each other's messages away. The mechanism
+  of the plan (`?embed=1&chat=ID`) is there and is what the side chat uses; a chat of the user can be opened in the split pane with the
+  picker of the pane.
+- **The panes share the localStorage of the app** (the model, the chat tabs): the embed pane is the same origin, so the tabs of the pane
+  can overwrite the tabs of the main window. Not fixed — the fix would be a namespaced `pref()`, and `pref` is a `const` in `app.js`.
+- The side chat is named "Side chat — <title of the main chat>" and is marked as named (`titled`), so the model does not give it a title of its own.
+- The temporary-chat rule is inherited by the panes (they are the same app): the memory is never used and nothing is saved in a temporary chat.
 
 ### Step 12: workspace agent (Cowork/Code-lite)
 Highest risk step. There is **no VM sandbox**, so keep it conservative.

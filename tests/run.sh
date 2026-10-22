@@ -27,10 +27,10 @@ name_of() {
     1) echo step1-attachments ;;     2) echo step2-artifacts ;;      3) echo step3-projects ;;
     4) echo step4-thinking-branches ;; 5) echo step5-styles-memory ;; 6) echo step6-mcp-tools ;;
     7) echo step7-desktop-polish ;;  8) echo step8-quickwins ;;  9) echo step9-claude-import ;;
-    10) echo step10-skills ;;  *) echo "" ;;
+    10) echo step10-skills ;; 11) echo step11-side-split ;;  *) echo "" ;;
   esac
 }
-STEPS=("$@"); [ ${#STEPS[@]} -eq 0 ] && STEPS=(1 2 3 4 5 6 7 8 9 10)
+STEPS=("$@"); [ ${#STEPS[@]} -eq 0 ] && STEPS=(1 2 3 4 5 6 7 8 9 10 11)
 FAILED=()
 for n in "${STEPS[@]}"; do
   f="$(name_of "$n")"; [ -z "$f" ] && { echo "unknown step $n"; FAILED+=("$n"); continue; }
