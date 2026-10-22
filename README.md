@@ -29,6 +29,10 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 - Styles: Concise / Explanatory / Formal / Friendly presets plus your own custom styles, chosen per chat from the header
 - Memory (🧠 in the sidebar): facts the assistant carries into every chat. Add them by hand, with the Remember button on a message, or by typing "Remember that …". Memory is never used or saved in Temporary chats, and can be switched off
 - Tools via MCP (🔧 Tools in the header): connect Model Context Protocol servers (a local command, or a remote Streamable-HTTP URL) and let tool-capable models call them. Every call shows an approval card (Allow once / Always allow / Deny); results appear in the chat and are fed back to the model, for up to 8 rounds per turn. Stop cancels a pending approval
+- Import from Claude Desktop (🔧 Tools → Import from Claude): Lumen reads Claude's config (read-only) and shows a review dialog with the servers it finds — their command, their arguments and their environment variables (values masked). You add each one yourself, with the same trust question as any other server; nothing is ever added automatically, and a server that is already in Lumen is marked as such
+- Extensions: upload a `.mcpb`/`.dxt` bundle, or import one of Claude Desktop's own extensions (by reference — its files are never copied or changed). Lumen unpacks the bundle, reads its `manifest.json` and asks for the settings it declares (a text, a number, a folder, a file, a switch; secret fields are password fields). The placeholders `${__dirname}`, `${HOME}` and `${user_config.…}` are filled in, and the extension starts like any other MCP server
+- A switch per tool (🔧 Tools): switch a tool off and it is no longer sent to the model, and the server refuses to run it. The switches are Lumen's own — Claude's toggles are never read
+- MCP log viewer: the ≡ button on a server shows its last output (the last 200 lines of stderr), and "Reload all" starts every server again
 - Command palette (Ctrl/Cmd+K) to jump to any chat (across projects), switch model/style/project, or run any action; shortcuts: Ctrl/Cmd+Shift+O new chat, Ctrl/Cmd+B sidebar, Ctrl/Cmd+/ help, Esc stops a running reply
 - Web access (off by default, 🔧 Tools → Web access): built-in `fetch_page` (public pages only; private/local addresses are blocked) and `web_search` via your own SearXNG instance or the Brave Search API. Every call still needs approval
 - Voice dictation (🎤): uses the browser's speech recognition and asks for consent first, because Chrome/Edge send the audio to the vendor's servers
@@ -54,11 +58,23 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 | `GET /api/usage` | token usage per model and per day (aggregated from the saved chats) |
 | `GET /api/logs` | the server's own recent log lines |
 | `GET /api/diagnostics` | diagnostic report (versions, paths, Ollama status — no chat content) |
+| `GET /api/claude/config` | the MCP servers of Claude Desktop (read-only; env values masked) |
+| `POST /api/claude/import` | add one server of Claude's config (needs `confirm: true`) |
+| `GET /api/claude/extensions` | the extensions Claude Desktop has installed |
+| `POST /api/claude/extensions` | unpack an uploaded `.mcpb`/`.dxt` bundle and read its manifest |
+| `POST /api/claude/extensions/install` | install an extension as an MCP server (needs `confirm: true`) |
+| `GET /api/mcp/:id/logs` | the last stderr lines of a server |
+| `POST /api/mcp/reload` | start every enabled server again |
+| `PUT /api/mcp/:id/tools` | switch the tools of a server on or off |
+| `PUT /api/mcp/:id/env` | replace or remove one environment value (the old value is never sent back) |
 
 ## Security notes
 
 - Lumen listens on `127.0.0.1` only and has no login: anyone who can reach that port on this computer can use it.
 - MCP servers are programs that run as you. Only add servers you trust. Their config (including any environment variables you enter, such as API keys) is stored in plain text in `data/settings.json`.
+- Claude Desktop's config is only ever read — Lumen never writes in Claude's folders. An imported server or extension is never added without your confirmation, and a tool is never approved for you.
+- Environment values are secrets: the browser only gets the keys and a mask (`••••1234`), and a value can only be replaced, never read back. The command, the arguments and the URL are scrubbed of secret values as well.
+- An uploaded extension bundle is treated as hostile input: paths that escape the folder, symlinks, encrypted entries and oversized bundles are refused (2000 files, 50 MB in total, 20 MB per file, 20 MB per upload).
 - Because Lumen can launch programs, the API rejects cross-site requests (mismatched `Origin`, `Sec-Fetch-Site: cross-site`, non-JSON bodies) and unexpected `Host` headers (DNS rebinding), so a web page you visit cannot drive it.
 - Tool calls always need your approval unless you chose "Always allow" for that exact tool (revoke in 🔧 Tools).
 - Artifact previews are sandboxed with an opaque origin and cannot reach the API or your chats.

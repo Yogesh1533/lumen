@@ -32,6 +32,7 @@ const hooks = {
   onNewChat: null,     // () after a new chat starts
   onReply: null,       // (reply) after an assistant reply finishes
   onRender: null,      // () after the messages are re-rendered
+  onToolsRender: null, // () after the list of MCP servers is re-rendered
 };
 
 // ---- utilities -----------------------------------------------------------
@@ -406,6 +407,7 @@ function buildTools() {
     let prefix = slug(srv.name); while (used.has(prefix)) prefix += '_';
     used.add(prefix);
     for (const t of srv.tools) {
+      if (t.enabled === false) continue; // a tool that is switched off never reaches the model
       const name = (prefix + '__' + t.name).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
       map.set(name, { server: srv.id, serverName: srv.name, tool: t.name });
       defs.push({ type: 'function', function: { name, description: `[${srv.name}] ${t.description}`.slice(0, 1000), parameters: t.inputSchema } });
@@ -477,12 +479,15 @@ function renderMcp() {
   const box = $('#mcpList'); box.innerHTML = '';
   for (const srv of state.mcp) {
     const d = document.createElement('div'); d.className = 'mcp';
-    const where = srv.builtin ? 'Built in — no process to run' : srv.transport === 'http' ? srv.url : srv.command;
+    d.dataset.id = srv.id;
+    const cmd = [srv.command || '', ...(srv.args || [])].filter(Boolean).join(' ');
+    const where = srv.builtin ? 'Built in — no process to run' : srv.transport === 'http' ? srv.url : cmd;
     d.innerHTML = `<div class="mh"><span class="dot ${srv.enabled ? srv.status : ''}" title="${srv.enabled ? srv.status : 'disabled'}"></span><span class="nm">${esc(srv.name)}</span>
       <span class="meta">${srv.enabled && srv.status === 'connected' ? srv.tools.length + ' tools' : srv.enabled ? srv.status : 'off'}</span>
       ${srv.builtin ? '' : `<label class="toggle"><input type="checkbox" data-a="en" ${srv.enabled ? 'checked' : ''}> On</label>
       <button type="button" class="icon" data-a="rc" title="Reconnect">↻</button><button type="button" class="icon" data-a="rm" title="Remove">✕</button>`}</div>
       <div class="meta" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(where)}</div>
+      ${srv.extension ? `<div class="meta">Extension: ${esc(srv.extension.name || srv.extension.id)}</div>` : ''}
       ${srv.error ? `<div class="err">${esc(srv.error)}</div>` : ''}
       ${srv.stderr ? `<details><summary>Server output (stderr)</summary><pre>${esc(srv.stderr)}</pre></details>` : ''}
       ${srv.tools.length ? `<details><summary>${srv.tools.length} tools</summary>${srv.tools.map((t) => `<div><b>${esc(t.name)}</b> ${esc(t.description).slice(0, 160)}</div>`).join('')}</details>` : ''}`;
@@ -506,6 +511,7 @@ function renderMcp() {
     al.appendChild(row);
   }
   if (!al.children.length) al.innerHTML = '<span class="sub">None. Choose “Always allow” on a tool call to add one.</span>';
+  if (hooks.onToolsRender) hooks.onToolsRender();
 }
 async function mcpAct(fn) {
   if (mcpBusy) return; mcpBusy = true; $('#mcMsg').textContent = 'Working…';
