@@ -7,6 +7,8 @@ const path = require('path');
 const zlib = require('zlib');
 
 // Limits for one bundle (documented in docs/ROADMAP.md).
+// They are checked on the bytes that are really produced, not on the numbers the
+// bundle claims: the sizes in the central directory are only a first filter.
 const LIMITS = {
   maxEntries: 2000,                  // files in one bundle
   maxTotalBytes: 50 * 1024 * 1024,   // 50 MB uncompressed in total
@@ -71,6 +73,8 @@ function readDirectory(buf) {
   return entries;
 }
 
+// The content of one entry. The inflation is bounded: a bundle that claims a small
+// file but produces a huge one is stopped here, before the bytes exist.
 function readData(buf, e) {
   if (e.localOff + 30 > buf.length || buf.readUInt32LE(e.localOff) !== LOC_SIG) throw new Error('The zip file is broken');
   const nameLen = buf.readUInt16LE(e.localOff + 26);
@@ -80,20 +84,31 @@ function readData(buf, e) {
   if (end > buf.length) throw new Error('The zip file is broken');
   const raw = buf.subarray(start, end);
   if (e.method === 0) return Buffer.from(raw);
-  if (e.method === 8) return zlib.inflateRawSync(raw);
+  if (e.method === 8) {
+    try { return zlib.inflateRawSync(raw, { maxOutputLength: LIMITS.maxFileBytes }); }
+    catch { throw new Error(`"${e.name}" is bigger than the file limit (${LIMITS.maxFileBytes} bytes)`); }
+  }
   throw new Error(`Unsupported compression method ${e.method}`);
 }
 
 // Every file of the bundle, with its content. Throws on anything suspicious.
+// The sizes are measured on the bytes that come out of the inflation, so a bundle
+// that lies in its directory cannot get past the limits.
 function readZip(buf) {
   if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf);
   if (buf.length > LIMITS.maxBundleBytes) throw new Error('The bundle is bigger than the size limit');
   const out = [];
+  let total = 0;
   for (const e of readDirectory(buf)) {
     if (e.name.endsWith('/')) continue; // directory entry
     const name = safeName(e.name);
     if (!name) throw new Error(`The bundle contains an unsafe path ("${e.name}")`);
-    out.push({ name, data: readData(buf, e) });
+    const data = readData(buf, e);
+    if (data.length > LIMITS.maxFileBytes) throw new Error(`"${e.name}" is bigger than the file limit (${LIMITS.maxFileBytes} bytes)`);
+    if (e.compSize > 0 && data.length / e.compSize > LIMITS.maxRatio) throw new Error(`"${e.name}" expands too much — refusing a zip bomb`);
+    total += data.length;
+    if (total > LIMITS.maxTotalBytes) throw new Error(`The bundle is bigger than the size limit (${LIMITS.maxTotalBytes} bytes)`);
+    out.push({ name, data });
   }
   return out;
 }
@@ -105,9 +120,12 @@ function extract(buf, destDir) {
   const root = path.resolve(destDir);
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(root, { recursive: true });
+  let written = 0;
   for (const f of files) {
     const target = path.resolve(root, f.name);
     if (!target.startsWith(root + path.sep)) throw new Error(`The bundle tried to write outside its folder ("${f.name}")`);
+    written += f.data.length;
+    if (written > LIMITS.maxTotalBytes) throw new Error(`The bundle is bigger than the size limit (${LIMITS.maxTotalBytes} bytes)`);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, f.data, { mode: 0o600, flag: 'wx' });
   }

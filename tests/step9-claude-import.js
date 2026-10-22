@@ -5,6 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { zip } = require('./lib/zipwrite');
+const zipReader = require('../zip.js');
+const claudeMod = require('../claude.js');
 
 const TMP = process.env.LUMEN_TEST_TMP || path.join(os.tmpdir(), 'lumen-tests');
 const REPO = path.join(__dirname, '..');
@@ -18,10 +20,14 @@ const EXT_DIR = path.join(DATA_DIR, 'extensions');
 
 const CLAUDE_SECRET = 'sk-CLAUDE-SECRET-1234';   // in the fixture config of Claude Desktop
 const EXT_SECRET = 'FIXTURE-TOKEN-abc123';       // a sensitive setting of the fixture extension
+const SHORT_SECRET = 'Q7z';                      // a secret of three characters
 const HOME = os.homedir();
+const MCP_TEST_SERVER = path.join(REPO, 'tests', 'mcp-test-server.js');
 
 // ---- the fixtures ----------------------------------------------------------
 // A tiny MCP server that goes into the extension bundle. It uses the SDK of this repo.
+// It writes its arguments to stderr — like many servers do when they fail — so the test
+// can check that a secret in an argument never reaches the browser.
 function tinyServerSource() {
   return `const req = require('module').createRequire(${JSON.stringify(path.join(REPO, 'package.json'))});
 const { McpServer } = req('@modelcontextprotocol/sdk/server/mcp.js');
@@ -32,7 +38,7 @@ server.registerTool('echo', { description: 'Echo a value back.', inputSchema: { 
   async ({ value }) => ({ content: [{ type: 'text', text: 'echo: ' + value }] }));
 server.registerTool('ping', { description: 'Answer with pong.', inputSchema: {} },
   async () => ({ content: [{ type: 'text', text: 'pong' }] }));
-process.stderr.write('fixture extension ready\\n');
+process.stderr.write('fixture extension ready: ' + process.argv.slice(2).join(' ') + '\\n');
 server.connect(new StdioServerTransport());
 `;
 }
@@ -60,9 +66,17 @@ function writeFixtures() {
   // The config of Claude Desktop — a fixture, never the real file.
   fs.writeFileSync(CLAUDE_CFG, JSON.stringify({
     mcpServers: {
-      'Claude Files': { command: 'node', args: [path.join(REPO, 'tests', 'mcp-test-server.js')], env: { CLAUDE_TOKEN: CLAUDE_SECRET } },
-      'Claude Browser': { command: 'node', args: [path.join(REPO, 'tests', 'mcp-test-server.js'), '--ui'] },
+      'Claude Files': { command: 'node', args: [MCP_TEST_SERVER], env: { CLAUDE_TOKEN: CLAUDE_SECRET } },
+      'Claude Browser': { command: 'node', args: [MCP_TEST_SERVER, '--ui'] },
       'Claude Remote': { url: 'http://127.0.0.1:9/mcp' },
+      // A secret that is also in an argument: the argument must be masked as well.
+      'Claude Args': { command: 'node', args: [MCP_TEST_SERVER, '--token', CLAUDE_SECRET], env: { CLAUDE_TOKEN: CLAUDE_SECRET } },
+      // A secret of three characters: a short secret must be masked too.
+      'Claude Short': { command: 'node', args: [MCP_TEST_SERVER, '--key', SHORT_SECRET], env: { SHORT_KEY: SHORT_SECRET } },
+      // A URL that is not http(s): the import must refuse it.
+      'Claude File URL': { url: 'file:///etc/passwd' },
+      // A name that is far too long.
+      'Claude Long Name Long Name Long Name Long Name': { command: 'node', args: [MCP_TEST_SERVER, '--long'] },
     },
   }, null, 2));
   // An extension that Claude Desktop has installed (read-only, imported by reference).
@@ -84,6 +98,10 @@ const fixtureBundle = (manifest = FIXTURE_MANIFEST, extra = []) => zip([
   { name: 'server.js', data: tinyServerSource() },
   ...extra,
 ]);
+// The same bundle as a file on disk (the upload field of the dialog).
+const BUNDLE_FILE = path.join(TMP, 'fixture-extension.mcpb');
+fs.mkdirSync(TMP, { recursive: true });
+fs.writeFileSync(BUNDLE_FILE, fixtureBundle());
 
 // ---- helpers ---------------------------------------------------------------
 // An API call from Node. The server answers on localhost, so it goes through the same
@@ -99,11 +117,52 @@ async function call(method, url, body) {
   try { json = JSON.parse(text); } catch { /* not json */ }
   return { status: r.status, json, text };
 }
-const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+// The settings on disk. The server writes them a moment later, so the file is waited for
+// until it holds what the test is looking for.
+async function settingsOnDisk(match) {
+  let last = null;
+  for (let i = 0; i < 60; i++) {
+    try {
+      last = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+      if (!match || match(last)) return last;
+    } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    await sleep(100);
+  }
+  throw new Error('the settings on disk never held what the test was looking for: ' + JSON.stringify(last).slice(0, 300));
+}
+// The files of a folder, with their size (to prove that nothing was written).
+function tree(dir) {
+  const out = [];
+  const walk = (d, rel) => {
+    for (const n of fs.readdirSync(d).sort()) {
+      const p = path.join(d, n);
+      const st = fs.statSync(p);
+      if (st.isDirectory()) walk(p, rel + n + '/');
+      else out.push(rel + n + ':' + st.size);
+    }
+  };
+  try { walk(dir, ''); } catch { /* no folder */ }
+  return out.join('\n');
+}
+// Unpack a bundle with the shipped reader and report what happened.
+function unpack(buf) {
+  const dir = path.join(TMP, 'zip-unit-' + Math.random().toString(36).slice(2));
+  try { zipReader.extract(buf, dir); return { refused: false, msg: '', dir }; }
+  catch (e) { return { refused: true, msg: String(e.message || e), dir }; }
+}
+const filesIn = (dir) => { try { return fs.readdirSync(dir); } catch { return []; } };
+// Data that repeats a block: it compresses about 110:1, so the ratio limit stays quiet
+// and only the size limits can fire.
+function softData(bytes) {
+  const block = require('crypto').randomBytes(30000);
+  const out = Buffer.alloc(bytes);
+  for (let i = 0; i < bytes; i += block.length) block.copy(out, i, 0, Math.min(block.length, bytes - i));
+  return out;
+}
 
 (async () => {
   const h = await launch(BASE, 9347);
-  const { ev, ok, waitFor, shot } = h;
+  const { ev, ok, waitFor, shot, setFiles } = h;
   // The trust question is answered "yes", but every question is recorded.
   await ev(`window.__confirms = []; window.confirm = (m) => { window.__confirms.push(String(m)); return true; }; 1`);
 
@@ -111,12 +170,19 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   const cfg = await call('GET', '/api/claude/config');
   ok('the Claude config is found', cfg.status === 200 && cfg.json.exists === true, cfg.text.slice(0, 120));
   ok('the path of the config is reported', cfg.json.path === CLAUDE_CFG, cfg.json.path);
-  ok('both servers of the config are listed', (cfg.json.servers || []).length === 3, JSON.stringify((cfg.json.servers || []).map((s) => s.key)));
+  const keys = (cfg.json.servers || []).map((s) => s.key).sort();
+  ok('every server of the config is listed', keys.join('|') === ['Claude Args', 'Claude Browser', 'Claude File URL', 'Claude Files', 'Claude Long Name Long Name Long Name Long Name', 'Claude Remote', 'Claude Short'].join('|'), JSON.stringify(keys));
   const files = (cfg.json.servers || []).find((s) => s.key === 'Claude Files');
   ok('the command and the arguments are shown', !!files && files.command === 'node' && files.args[0].endsWith('mcp-test-server.js'), JSON.stringify(files && files.args));
   ok('the env key is shown', !!files && files.envKeys.includes('CLAUDE_TOKEN'), JSON.stringify(files && files.envKeys));
   ok('the env value is masked', !!files && /•+/.test(files.env.CLAUDE_TOKEN) && !files.env.CLAUDE_TOKEN.includes('SECRET'), JSON.stringify(files && files.env));
   ok('the plain secret never appears in the answer', !cfg.text.includes(CLAUDE_SECRET), 'the secret leaked');
+  // A secret that stands in an argument of Claude's config is masked as well.
+  const argsSrv = (cfg.json.servers || []).find((s) => s.key === 'Claude Args');
+  ok('a secret in an argument is masked', !!argsSrv && !argsSrv.args.join(' ').includes(CLAUDE_SECRET), JSON.stringify(argsSrv && argsSrv.args));
+  // A secret of three characters is masked too.
+  const shortSrv = (cfg.json.servers || []).find((s) => s.key === 'Claude Short');
+  ok('a secret of three characters is masked', !!shortSrv && !shortSrv.args.join(' ').includes(SHORT_SECRET), JSON.stringify(shortSrv && shortSrv.args));
   const cfgBefore = fs.readFileSync(CLAUDE_CFG, 'utf8');
 
   // ---- 2. never added on its own -------------------------------------------
@@ -126,6 +192,12 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   ok('importing without a confirmation is refused', noConfirm.status === 400 && /confirm/i.test(noConfirm.json.error), noConfirm.text);
   mcp = await call('GET', '/api/mcp');
   ok('a refused import adds nothing', !(mcp.json || []).some((s) => s.name === 'Claude Files'));
+  // A server of Claude's config that is not safe to run is refused as well.
+  const badUrl = await call('POST', '/api/claude/import', { key: 'Claude File URL', confirm: true });
+  ok('a server with a URL that is not http(s) is refused', badUrl.status === 400, badUrl.text.slice(0, 200));
+  ok('the refused server was not added', !(await call('GET', '/api/mcp')).json.some((s) => (s.url || '').includes('file://')));
+  const longName = await call('POST', '/api/claude/import', { key: 'Claude Long Name Long Name Long Name Long Name', confirm: true });
+  ok('the name of an imported server is cut to 40 characters', longName.status === 200 && longName.json.name.length <= 40, longName.json && longName.json.name);
 
   // ---- 3. the import -------------------------------------------------------
   const imp = await call('POST', '/api/claude/import', { key: 'Claude Files', confirm: true });
@@ -133,6 +205,7 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   ok('the imported server is connected', imp.json.status === 'connected', JSON.stringify(imp.json.error || imp.json.status));
   ok('the imported server brings its tools', (imp.json.tools || []).length === 3, String((imp.json.tools || []).length));
   ok('the env value of the imported server is masked', !imp.text.includes(CLAUDE_SECRET) && /•+/.test(imp.json.env.CLAUDE_TOKEN), imp.json.env && imp.json.env.CLAUDE_TOKEN);
+  ok('the env key of the imported server is kept', (imp.json.envKeys || []).includes('CLAUDE_TOKEN'), JSON.stringify(imp.json.envKeys));
   mcp = await call('GET', '/api/mcp');
   ok('the imported server is in the list', (mcp.json || []).some((s) => s.name === 'Claude Files'));
   ok('no answer contains the secret', !mcp.text.includes(CLAUDE_SECRET), 'the secret leaked');
@@ -148,10 +221,23 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
     const r = await call('GET', url);
     ok(`the secret is not in ${url}`, !r.text.includes(CLAUDE_SECRET), r.text.slice(0, 120));
   }
-  await sleep(400); // the settings are written a moment later
-  const onDisk = settingsOnDisk();
-  ok('the secret is stored on the server', JSON.stringify(onDisk.mcpServers).includes(CLAUDE_SECRET), 'the secret was not stored');
+  const onDisk = await settingsOnDisk((s) => (s.mcpServers || []).some((x) => (x.id === importedId) && Object.keys(x.env || {}).includes('CLAUDE_TOKEN')));
+  ok('the env key of the imported server is stored', JSON.stringify(onDisk.mcpServers.map((s) => s.envKeys || Object.keys(s.env || {}))).includes('CLAUDE_TOKEN'));
   ok('the settings that the browser gets hold no secret', !JSON.stringify((await call('GET', '/api/settings')).json).includes(CLAUDE_SECRET));
+
+  // The env editor of the dialog: the keys are shown, the values are not.
+  await ev(`document.querySelector('#toolsBtn').click(); 1`); await sleep(500);
+  await ev(`document.querySelector('#mcpList .mcp[data-id="${importedId}"] [data-a=env]').click(); 1`); await sleep(400);
+  ok('the env dialog opens', await ev(`!!document.querySelector('#envDlg') && document.querySelector('#envDlg').open`));
+  const envText = await ev(`document.querySelector('#envFields').textContent`);
+  ok('the env dialog shows the key', /CLAUDE_TOKEN/.test(envText), envText);
+  ok('the env dialog never shows the value', !/SECRET/.test(envText), envText);
+  ok('the env dialog has a field for the new value', await ev(`!!document.querySelector('#envFields .envrow input[type=password]')`));
+  await ev(`(() => { document.querySelector('#envFields .envrow input').value = 'ui-token-7777'; return 1; })()`);
+  await ev(`document.querySelector('#envSave').click(); 1`); await sleep(1200);
+  const afterEnv = (await call('GET', '/api/mcp')).json.find((s) => s.id === importedId);
+  ok('the value typed in the dialog is stored (masked)', /•+7777/.test((afterEnv.env || {}).CLAUDE_TOKEN || ''), JSON.stringify(afterEnv.env));
+  await ev(`document.querySelector('#toolsClose').click(); 1`); await sleep(200);
 
   // ---- 5. the per-tool switches --------------------------------------------
   await ev(`loadMcp().then(() => 1)`);
@@ -168,8 +254,8 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   const blocked = await call('POST', '/api/mcp/call', { server: importedId, tool: 'add', arguments: { a: 1, b: 2 } });
   ok('a tool that is off does not run', blocked.json && blocked.json.isError === true, blocked.text.slice(0, 120));
   await sleep(400); // the settings are written a moment later
-  const onDisk2 = settingsOnDisk();
-  ok('the switches are stored in the settings of Lumen', JSON.stringify(onDisk2.toolToggles || {}) === JSON.stringify({ [importedId]: { add: false } }), JSON.stringify(onDisk2.toolToggles));
+  const onDisk2 = await settingsOnDisk((s) => JSON.stringify((s.toolToggles || {})[importedId] || null) === JSON.stringify({ add: false }));
+  ok('the switches are stored in the settings of Lumen', JSON.stringify((onDisk2.toolToggles || {})[importedId] || null) === JSON.stringify({ add: false }), JSON.stringify(onDisk2.toolToggles));
   await call('PUT', `/api/mcp/${importedId}/tools`, { disabled: [] });
   await ev(`loadMcp().then(() => { renderMcp(); return 1; })`);
   const tools2 = await ev(`JSON.stringify((buildTools() || { defs: [] }).defs.map((d) => d.function.name))`);
@@ -198,10 +284,16 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   const tokenArg = args[args.indexOf('--token') + 1] || '';
   ok('the sensitive value is masked in the answer', !install.text.includes(EXT_SECRET) && /•+/.test(tokenArg), JSON.stringify(args));
   ok('the extension starts and brings its tools', install.json.status === 'connected' && (install.json.tools || []).length === 2, JSON.stringify(install.json.error || (install.json.tools || []).length));
-  await sleep(400); // the settings are written a moment later
-  const extOnDisk = settingsOnDisk();
-  ok('the sensitive value is stored on the server', JSON.stringify(extOnDisk.mcpServers).includes(EXT_SECRET));
+  await sleep(500); // the server writes its arguments to stderr
+  const extOnDisk = await settingsOnDisk((s) => (s.mcpServers || []).some((x) => (x.extension || {}).id === up.json.id));
+  ok('the settings of the extension are stored', JSON.stringify(extOnDisk.mcpServers.map((s) => s.extension || null)).includes(up.json.id));
   ok('the secret is not in the list of the servers', !(await call('GET', '/api/mcp')).text.includes(EXT_SECRET));
+  // The output of the server may not show the secret either.
+  const extLogs = await call('GET', `/api/mcp/${install.json.id}/logs`);
+  ok('the log of a server does not show its secret', !extLogs.text.includes(EXT_SECRET), extLogs.text.slice(0, 200));
+  ok('the secret in the log is masked', /•+/.test(extLogs.text), extLogs.text.slice(0, 200));
+  const extView = (await call('GET', '/api/mcp')).json.find((s) => s.id === install.json.id);
+  ok('the output in the list of the servers does not show the secret', !JSON.stringify(extView && extView.stderr).includes(EXT_SECRET), JSON.stringify(extView && extView.stderr));
 
   // ---- 7. a bundle that tries to escape -------------------------------------
   const evil = zip([{ name: '../evil.txt', data: 'gotcha' }, { name: 'manifest.json', data: JSON.stringify(FIXTURE_MANIFEST) }]);
@@ -213,23 +305,82 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   ok('a bundle with an absolute path is refused', absRes.status === 400, absRes.text.slice(0, 200));
 
   // ---- 8. the size limits ---------------------------------------------------
-  const big = zip([{ name: 'big.bin', data: Buffer.alloc(21 * 1024 * 1024, 7), store: true }]);
-  const bigRes = await call('POST', '/api/claude/extensions', { file: big.toString('base64'), filename: 'big.mcpb' });
-  ok('a file that is too big is refused', bigRes.status === 400 && /limit|big/i.test(bigRes.json.error), bigRes.text.slice(0, 200));
-  const bomb = zip([{ name: 'bomb.bin', data: Buffer.alloc(5 * 1024 * 1024, 0) }]);
-  const bombRes = await call('POST', '/api/claude/extensions', { file: bomb.toString('base64'), filename: 'bomb.mcpb' });
-  ok('a bundle that expands too much is refused', bombRes.status === 400 && /expand|bomb|limit/i.test(bombRes.json.error), bombRes.text.slice(0, 200));
+  // The limits are checked on the bytes that are really produced, not on the numbers
+  // the bundle claims: a bundle that lies about its size is refused as well.
+  const LIM = zipReader.LIMITS;
+  {
+    const lying = zip([{ name: 'bomb.bin', data: Buffer.alloc(8 * 1024 * 1024, 0), opts: { declaredSize: 10 } }]);
+    const r = unpack(lying);
+    ok('a bundle that lies about its size is refused', r.refused, r.msg);
+    ok('the refusal names the limit', /limit|bigger|big|expand/i.test(r.msg), r.msg);
+    ok('nothing is written from a bundle that lies about its size', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
+  }
+  {
+    const lying = zip([{ name: 'big.bin', data: Buffer.alloc(21 * 1024 * 1024, 0), opts: { declaredSize: 10 } }]);
+    const r = unpack(lying);
+    ok('a file over the file limit is refused even when the bundle lies about its size', r.refused, r.msg);
+    ok('nothing is written from a file over the file limit', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
+  }
+  {
+    // Three files of 17 MB: more than the 50 MB in total. The data repeats a block, so
+    // it compresses about 110:1 and the ratio limit does not fire — only the total does.
+    const three = [0, 1, 2].map((i) => ({ name: `f${i}.bin`, data: softData(17 * 1024 * 1024), opts: { declaredSize: 10 } }));
+    const r = unpack(zip(three));
+    ok('a bundle over the total limit is refused even when the bundle lies about its size', r.refused, r.msg);
+    ok('nothing is written from a bundle over the total limit', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
+  }
+  {
+    const many = [];
+    for (let i = 0; i < LIM.maxEntries + 1; i++) many.push({ name: `f${i}.txt`, data: 'x' });
+    const r = unpack(zip(many));
+    ok('a bundle with too many files is refused', r.refused && /files|limit/i.test(r.msg), r.msg);
+    ok('nothing is written from a bundle with too many files', filesIn(r.dir).length === 0, JSON.stringify(filesIn(r.dir)));
+  }
+  {
+    let refused = false, msg = '';
+    try { zipReader.readZip(Buffer.alloc(LIM.maxBundleBytes + 1)); } catch (e) { refused = true; msg = String(e.message || e); }
+    ok('a bundle over the upload limit is refused', refused && /limit|size/i.test(msg), msg);
+  }
+  {
+    const r = unpack(zip([{ name: 'link', data: '/etc/passwd', opts: { symlink: true } }]));
+    ok('a bundle with a symlink is refused', r.refused && /symlink/i.test(r.msg), r.msg);
+  }
+  {
+    const r = unpack(zip([{ name: 'enc.txt', data: 'hello', opts: { encrypt: true } }]));
+    ok('an encrypted bundle is refused', r.refused && /encrypt/i.test(r.msg), r.msg);
+  }
+  {
+    const r = unpack(zip([{ name: 'z64.txt', data: 'hello', opts: { zip64: true } }]));
+    ok('a Zip64 bundle is refused', r.refused && /zip64/i.test(r.msg), r.msg);
+  }
+  {
+    // The same bundle, but over the API: nothing may be written either.
+    const lying = zip([{ name: 'manifest.json', data: JSON.stringify(FIXTURE_MANIFEST) }, { name: 'bomb.bin', data: Buffer.alloc(8 * 1024 * 1024, 0), opts: { declaredSize: 10 } }]);
+    const res = await call('POST', '/api/claude/extensions', { file: lying.toString('base64'), filename: 'lying.mcpb' });
+    ok('the server refuses a bundle that lies about its size', res.status === 400, res.text.slice(0, 200));
+    const anyBomb = fs.existsSync(EXT_DIR) && fs.readdirSync(EXT_DIR).some((d) => fs.existsSync(path.join(EXT_DIR, d, 'bomb.bin')));
+    ok('nothing is written from a bundle that lies about its size', !anyBomb);
+  }
+  {
+    const big = zip([{ name: 'big.bin', data: Buffer.alloc(21 * 1024 * 1024, 7), store: true }]);
+    const bigRes = await call('POST', '/api/claude/extensions', { file: big.toString('base64'), filename: 'big.mcpb' });
+    ok('a file that is too big is refused', bigRes.status === 400 && /limit|big/i.test(bigRes.json.error), bigRes.text.slice(0, 200));
+    const bomb = zip([{ name: 'bomb.bin', data: Buffer.alloc(5 * 1024 * 1024, 0) }]);
+    const bombRes = await call('POST', '/api/claude/extensions', { file: bomb.toString('base64'), filename: 'bomb.mcpb' });
+    ok('a bundle that expands too much is refused', bombRes.status === 400 && /expand|bomb|limit/i.test(bombRes.json.error), bombRes.text.slice(0, 200));
+  }
 
   // ---- 9. the extensions of Claude Desktop (by reference) --------------------
   const exts = await call('GET', '/api/claude/extensions');
   ok('the extensions of Claude Desktop are listed', (exts.json.installed || []).some((e) => e.id === 'claude-fixture-extension'), exts.text.slice(0, 200));
   const claudeExt = (exts.json.installed || []).find((e) => e.id === 'claude-fixture-extension');
   ok('the files of Claude are not copied', claudeExt && claudeExt.path === CLAUDE_EXT_DIR, claudeExt && claudeExt.path);
+  const claudeTreeBefore = tree(CLAUDE_EXT_DIR);
   const refInstall = await call('POST', '/api/claude/extensions/install', {
     id: 'claude-fixture-extension', source: 'claude', confirm: true, userConfig: { dir: ['/tmp/lumen-claude'] },
   });
   ok('an extension of Claude is imported by reference', refInstall.status === 200 && refInstall.json.args[0] === path.join(CLAUDE_EXT_DIR, 'server.js'), JSON.stringify(refInstall.json.args || refInstall.text.slice(0, 200)));
-  ok('nothing was written into the folder of Claude', !fs.existsSync(path.join(CLAUDE_EXT_DIR, 'node_modules')));
+  ok('nothing was written into the folder of Claude', tree(CLAUDE_EXT_DIR) === claudeTreeBefore, tree(CLAUDE_EXT_DIR));
 
   // ---- 10. the logs and the reload -------------------------------------------
   const logs = await call('GET', `/api/mcp/${importedId}/logs`);
@@ -237,15 +388,18 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   ok('the log holds the output of the server', logs.json.lines.some((l) => /lumen-test MCP server ready/.test(l.text)), JSON.stringify(logs.json.lines));
   const reload = await call('POST', '/api/mcp/reload');
   ok('every server is started again', reload.status === 200 && reload.json.every((s) => s.status === 'connected'), JSON.stringify((reload.json || []).map((s) => [s.name, s.status])));
+  await sleep(700);
   const logs2 = await call('GET', `/api/mcp/${importedId}/logs`);
-  ok('the log survives the reload', logs2.json.lines.length >= 1, String(logs2.json.lines.length));
+  ok('the log survives the reload', logs2.json.lines.some((l) => /lumen-test MCP server ready/.test(l.text)), JSON.stringify(logs2.json.lines));
 
   // ---- 11. the user interface ------------------------------------------------
   await ev(`loadMcp().then(() => { renderMcp(); return 1; })`);
   await ev(`document.querySelector('#toolsBtn').click(); 1`); await sleep(500);
   ok('the tools dialog has an import button', await ev(`!!document.querySelector('#claudeImportBtn')`));
   ok('the tools dialog has a reload button', await ev(`!!document.querySelector('#mcpReloadAll')`));
-  ok('there is a switch for every tool', (await ev(`document.querySelectorAll('#toolToggles .tog').length`)) >= 3, String(await ev(`document.querySelectorAll('#toolToggles .tog').length`)));
+  const wantToggles = (await call('GET', '/api/mcp')).json.reduce((t, s) => t + (s.tools || []).length, 0);
+  const haveToggles = await ev(`document.querySelectorAll('#toolToggles .tog').length`);
+  ok('there is a switch for every tool', haveToggles === wantToggles, `${haveToggles} switches for ${wantToggles} tools`);
   await ev(`document.querySelector('#claudeImportBtn').click(); 1`); await sleep(600);
   ok('the import dialog opens', await ev(`!!document.querySelector('#claudeDlg') && document.querySelector('#claudeDlg').open`));
   const list = await ev(`document.querySelector('#claudeList').textContent`);
@@ -270,15 +424,75 @@ const settingsOnDisk = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   ok('the tool that was switched off is gone from the payload',
     gone.length === 1 && gone[0].endsWith('__' + firstToggle),
     JSON.stringify([firstToggle, gone, tools3]));
-  await ev(`document.querySelector('#toolsClose').click(); 1`);
+
+  // Two switches in quick succession: the first one must not be lost.
+  // The switches of one server start from a clean sheet: every tool of it is on.
+  const raceGroup = await ev(`(() => { const g = [...document.querySelectorAll('#toolToggles .toggles')].find((x) => x.querySelectorAll('.tog input').length >= 2); return g ? g.dataset.id : ''; })()`);
+  ok('the switches of a server are in a group of their own', !!raceGroup, String(raceGroup));
+  await call('PUT', `/api/mcp/${raceGroup}/tools`, { disabled: [] });
+  await ev(`loadMcp().then(() => { renderMcp(); return 1; })`); await sleep(500);
+  const race = await ev(`(() => { const g = [...document.querySelectorAll('#toolToggles .toggles')].find((x) => x.dataset.id === ${JSON.stringify(raceGroup)}); if (!g) return ''; const boxes = [...g.querySelectorAll('.tog input')].filter((b) => b.checked); if (boxes.length < 2) return ''; boxes[0].click(); boxes[1].click(); return g.dataset.id; })()`);
+  ok('two tools can be switched off at once', !!race, String(race));
+  await sleep(1500);
+  const raceSrv = (await call('GET', '/api/mcp')).json.find((s) => s.id === race);
+  const offNow = (raceSrv && raceSrv.tools || []).filter((t) => t.enabled === false).length;
+  ok('two tools that are switched off in quick succession stay off', offNow === 2, JSON.stringify((raceSrv && raceSrv.tools || []).map((t) => [t.name, t.enabled])));
 
   // The log viewer.
   await ev(`document.querySelector('#toolsBtn').click(); 1`); await sleep(400);
   await ev(`document.querySelector('#mcpList .mcp[data-id="${importedId}"] [data-a=log]').click(); 1`); await sleep(600);
   ok('the log viewer opens', await ev(`!!document.querySelector('#mcpLogsDlg') && document.querySelector('#mcpLogsDlg').open`));
   ok('the log viewer shows the output of the server', /lumen-test MCP server ready/.test(await ev(`document.querySelector('#logBox2').textContent`)), (await ev(`document.querySelector('#logBox2').textContent`)).slice(0, 120));
+  await ev(`document.querySelector('#logRefresh2').click(); 1`); await sleep(700);
+  ok('the log can be refreshed', await ev(`!!document.querySelector('#mcpLogsDlg') && document.querySelector('#mcpLogsDlg').open`));
+  ok('the refreshed log still shows the output', /lumen-test MCP server ready/.test(await ev(`document.querySelector('#logBox2').textContent`)), (await ev(`document.querySelector('#logBox2').textContent`)).slice(0, 120));
   await shot('step9-logs');
   await ev(`document.querySelector('#logClose2').click(); document.querySelector('#toolsClose').click(); 1`);
+
+  // ---- 12. the extension asks before it runs on the computer -----------------
+  await ev(`document.querySelector('#toolsBtn').click(); 1`); await sleep(400);
+  await ev(`document.querySelector('#claudeImportBtn').click(); 1`); await sleep(600);
+  await setFiles('#extFile', [BUNDLE_FILE]);
+  await sleep(1200);
+  ok('the form of an uploaded bundle is shown', await ev(`!!document.querySelector('#extForm') && !document.querySelector('#extForm').hidden`));
+  ok('the sensitive field of the form is masked', await ev(`!!document.querySelector('#extFields [data-k="token"]') && document.querySelector('#extFields [data-k="token"]').type === 'password'`));
+  ok('the sensitive field of the form has no value in the page', await ev(`document.querySelector('#extFields [data-k="token"]').getAttribute('value') === null`));
+  await ev(`(() => { const set = (k, v) => { const el = document.querySelector('#extFields [data-k="' + k + '"]'); if (el) el.value = v; }; set('dir', '/tmp/lumen-ui-one'); set('tag', 'ui'); set('token', 'ui-secret-value'); return 1; })()`);
+  const confirmsBefore = JSON.parse(await ev(`JSON.stringify(window.__confirms)`)).length;
+  await ev(`document.querySelector('#extInstall').click(); 1`); await sleep(1500);
+  const allConfirms = JSON.parse(await ev(`JSON.stringify(window.__confirms)`));
+  const lastConfirm = allConfirms[allConfirms.length - 1] || '';
+  ok('the extension asks before it runs on the computer', allConfirms.length > confirmsBefore && /trust|run this|only continue/i.test(lastConfirm), lastConfirm.slice(0, 200));
+  ok('the question shows the command that will run', /server\.js/.test(lastConfirm) && /--token/.test(lastConfirm), lastConfirm.slice(0, 300));
+  ok('the extension is installed after the confirmation', (await call('GET', '/api/mcp')).json.some((s) => (s.extension || {}).source === 'upload' && (s.extension || {}).id !== up.json.id));
+  await ev(`document.querySelector('#claudeClose').click(); 1`); await sleep(200);
+
+  // ---- 13. the env values of a server can be replaced, never read ------------
+  const envPut = await call('PUT', `/api/mcp/${importedId}/env`, { key: 'CLAUDE_TOKEN', value: 'new-token-9999' });
+  ok('an env value can be replaced', envPut.status === 200, envPut.text.slice(0, 120));
+  ok('the new value comes back masked', /•+9999/.test((envPut.json.env || {}).CLAUDE_TOKEN || ''), JSON.stringify(envPut.json.env));
+  ok('the old value is never returned', !envPut.text.includes('ui-token-7777') && !envPut.text.includes(CLAUDE_SECRET), envPut.text.slice(0, 200));
+  const envBad = await call('PUT', `/api/mcp/${importedId}/env`, { key: 'not a name', value: 'x' });
+  ok('a name that is not a variable name is refused', envBad.status === 400, envBad.text.slice(0, 120));
+  const envClear = await call('PUT', `/api/mcp/${importedId}/env`, { key: 'CLAUDE_TOKEN', clear: true });
+  ok('an env value can be removed', envClear.status === 200 && !(envClear.json.envKeys || []).includes('CLAUDE_TOKEN'), envClear.text.slice(0, 120));
+
+  // ---- 14. the built-in web tools can be switched off as well ----------------
+  await call('PUT', '/api/settings', { web: { enabled: true, provider: 'brave', braveKey: 'test-key' } });
+  const withWeb = await call('GET', '/api/mcp');
+  const builtin = (withWeb.json || []).find((s) => s.id === 'builtin');
+  ok('the built-in web tools are listed', !!builtin && (builtin.tools || []).length > 0, withWeb.text.slice(0, 200));
+  const webTool = builtin && (builtin.tools || [])[0].name;
+  const builtinSw = await call('PUT', '/api/mcp/builtin/tools', { disabled: [webTool] });
+  ok('a built-in tool can be switched off', builtinSw.status === 200 && (builtinSw.json.tools || []).some((t) => t.name === webTool && t.enabled === false), builtinSw.text.slice(0, 200));
+  const builtinCall = await call('POST', '/api/mcp/call', { server: 'builtin', tool: webTool, arguments: { query: 'x' } });
+  ok('a built-in tool that is switched off does not run', builtinCall.json && builtinCall.json.isError === true, builtinCall.text.slice(0, 120));
+
+  // ---- 15. the reader of the extension command --------------------------------
+  {
+    const bin = claudeMod.buildCommand({ manifest_version: '0.3', server: { type: 'binary', entry_point: '/tmp/lumen-binary' } }, {}, '/tmp');
+    ok('a binary extension runs the file itself, without itself as an argument', bin.command === '/tmp/lumen-binary' && bin.args.length === 0, JSON.stringify(bin));
+  }
 
   h.close();
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

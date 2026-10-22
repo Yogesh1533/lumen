@@ -123,8 +123,10 @@ function buildCommand(manifest, userConfig, dir) {
     // No mcp_config: run the entry point with the interpreter of its type.
     const entry = String(server.entry_point || '').trim();
     const type = String(server.type || 'node').toLowerCase();
-    command = type === 'python' || type === 'python3' ? 'python3' : (type === 'binary' ? entry : 'node');
-    args = entry ? [entry] : [];
+    if (type === 'python' || type === 'python3') { command = 'python3'; args = entry ? [entry] : []; }
+    // A binary runs itself: it must not be its own first argument.
+    else if (type === 'binary') { command = entry; args = []; }
+    else { command = 'node'; args = entry ? [entry] : []; }
   }
   const env = {};
   const cfgEnv = (cfg.env && typeof cfg.env === 'object' && !Array.isArray(cfg.env)) ? cfg.env : {};
