@@ -33,6 +33,13 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 - Web access (off by default, 🔧 Tools → Web access): built-in `fetch_page` (public pages only; private/local addresses are blocked) and `web_search` via your own SearXNG instance or the Brave Search API. Every call still needs approval
 - Voice dictation (🎤): uses the browser's speech recognition and asks for consent first, because Chrome/Edge send the audio to the vendor's servers
 - Installable: `npm run app` opens Lumen in its own window (Chrome/Edge/Brave/Chromium, starts and stops the server for you), or use "Install app" in the browser (web manifest included)
+- Usage (📊 Usage in the header): every reply keeps Ollama's token counters, the status line shows tokens/s, and the usage dialog totals them per model and per day. Cloud models (`:cloud`) are marked ☁
+- Read aloud: a "Read aloud" button on every reply (markdown stripped), a stop control, a voice picker and an optional auto-read switch in the Controls panel
+- Find in conversation (Ctrl/Cmd+F): a find bar with match count, next/previous and highlights; Esc closes it
+- Export: download a chat as Markdown (optionally with thinking and tool calls), copy it as Markdown, or print it to PDF (a print stylesheet hides the app chrome)
+- Chat tabs: a tab strip over the open chats, next/previous tab, reopen the last closed tab (Ctrl/Cmd+Shift+T), and a "Continue last chat when Lumen starts" switch; the open tabs are remembered across reloads
+- Try another model: regenerate a reply with a different model (the old answer stays as another version), or compare two models side by side in the ⚖ dialog and keep the answer you prefer
+- Troubleshooting (🧠 → Troubleshooting…): the server's own log lines, a diagnostic report (versions, data folder, Ollama reachability and model list — never chat content) and a copy button for bug reports. The log shows the status of the MCP servers, never their output — that stays in the Tools dialog
 - Safe markdown rendering (code blocks with copy, lists, tables, quotes)
 
 ## API
@@ -44,6 +51,9 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 | `GET/POST/DELETE /api/chats` | list (`?q=` search) / create / delete all |
 | `GET/PUT/DELETE /api/chats/:id` | read / update / delete |
 | `GET /api/chats/export` | download all chats |
+| `GET /api/usage` | token usage per model and per day (aggregated from the saved chats) |
+| `GET /api/logs` | the server's own recent log lines |
+| `GET /api/diagnostics` | diagnostic report (versions, paths, Ollama status — no chat content) |
 
 ## Security notes
 

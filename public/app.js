@@ -25,6 +25,15 @@ const state = {
   projectData: null,   // active project incl. knowledge text
 };
 
+// Feature hooks: optional steps register callbacks here (see public/features/).
+const hooks = {
+  onMsgAction: null,   // (act, m, idx) => true when the feature handled the click
+  onOpenChat: null,    // (chat) after a chat is opened
+  onNewChat: null,     // () after a new chat starts
+  onReply: null,       // (reply) after an assistant reply finishes
+  onRender: null,      // () after the messages are re-rendered
+};
+
 // ---- utilities -----------------------------------------------------------
 const api = async (path, opts = {}) => {
   const r = await fetch('/api' + path, {
@@ -475,6 +484,7 @@ function renderMcp() {
       <button type="button" class="icon" data-a="rc" title="Reconnect">↻</button><button type="button" class="icon" data-a="rm" title="Remove">✕</button>`}</div>
       <div class="meta" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(where)}</div>
       ${srv.error ? `<div class="err">${esc(srv.error)}</div>` : ''}
+      ${srv.stderr ? `<details><summary>Server output (stderr)</summary><pre>${esc(srv.stderr)}</pre></details>` : ''}
       ${srv.tools.length ? `<details><summary>${srv.tools.length} tools</summary>${srv.tools.map((t) => `<div><b>${esc(t.name)}</b> ${esc(t.description).slice(0, 160)}</div>`).join('')}</details>` : ''}`;
     if (srv.builtin) { box.appendChild(d); continue; }
     d.querySelector('[data-a=en]').onchange = async (e) => { await mcpAct(() => api('/mcp/' + srv.id, { method: 'PUT', body: { enabled: e.target.checked } })); };
@@ -728,12 +738,13 @@ function msgEl(m, idx) {
   el.className = 'msg ' + m.role; el.dataset.idx = idx;
   const isUser = m.role === 'user';
   el.innerHTML = `<div class="avatar">${isUser ? 'You' : 'AI'}</div>
-    <div class="body"><div class="who">${isUser ? 'You' : esc(state.chat.model || 'Assistant')}</div>
+    <div class="body"><div class="who">${isUser ? 'You' : esc(m.model || state.chat.model || 'Assistant')}</div>
     <div class="content"></div>
     ${versionsHTML(m)}
     <div class="tools">
       <button data-act="copy">Copy</button>
-      ${isUser ? '<button data-act="edit">Edit</button><button data-act="mem">Remember</button>' : '<button data-act="regen">Regenerate</button>'}
+      ${isUser ? '<button data-act="edit">Edit</button><button data-act="mem">Remember</button>'
+        : '<button data-act="regen">Regenerate</button><button data-act="regen2">Try another model</button><button data-act="speak">Read aloud</button>'}
       <button data-act="del">Delete</button>
     </div></div>`;
   paint(el, m);
@@ -830,6 +841,7 @@ function renderAll() {
   state.chat.messages.forEach((m, i) => box.appendChild(msgEl(m, i)));
   document.body.classList.toggle('chatting', state.chat.messages.length > 0);
   box.scrollTop = box.scrollHeight;
+  if (hooks.onRender) hooks.onRender();
 }
 function renderSidebar() {
   const list = $('#chatList'); list.innerHTML = '';
@@ -880,6 +892,7 @@ function newChat() {
   if (state.toolsBusy) cancelTools();
   closeArtifact();
   state.chat = { id: null, title: 'New Chat', model: $('#modelSelect').value, system: $('#systemPrompt').value, style: $('#styleSelect').value, project: state.project, messages: [] };
+  if (hooks.onNewChat) hooks.onNewChat();
   renderAll(); renderSidebar(); $('#input').focus();
 }
 async function openChat(id) {
@@ -892,6 +905,7 @@ async function openChat(id) {
   if (state.chat.model) $('#modelSelect').value = state.chat.model;
   $('#systemPrompt').value = state.chat.system || '';
   renderStyleSelect(state.chat.style || '');
+  if (hooks.onOpenChat) hooks.onOpenChat(state.chat);
   renderAll(); renderSidebar();
 }
 async function persist() {
@@ -913,17 +927,22 @@ function setBusy(b) {
   $('#status').textContent = b ? 'Generating…' : '';
 }
 
-async function generate(fork) {
+async function generate(fork, model) {
   const c = state.chat;
   c.model = $('#modelSelect').value; c.system = $('#systemPrompt').value.trim();
-  if (!c.model) { if (fork) { undoFork(fork); renderAll(); } return toast('No model selected — is Ollama running?'); }
-  const reply = { role: 'assistant', content: '' };
+  // A retry with another model keeps the chat's model but answers this one message with `model`.
+  const useModel = model || c.model;
+  // Only the call that opens the branch may finish or undo it — a follow-up answer that
+  // follows a tool call continues the same branch.
+  const ownsFork = !!(fork && !fork.finished);
+  if (!useModel) { if (ownsFork) { undoFork(fork); renderAll(); } return toast('No model selected — is Ollama running?'); }
+  const reply = { role: 'assistant', content: '', model: useModel, t: Date.now() };
   c.messages.push(reply);
-  if (fork) finishFork(fork, reply);
-  const caps = (state.models.find((m) => m.id === c.model) || { caps: [] }).caps;
+  if (ownsFork) { finishFork(fork, reply); fork.finished = true; }
+  const caps = (state.models.find((m) => m.id === useModel) || { caps: [] }).caps;
   const canThink = caps.includes('thinking');
   const toolSet = state.toolsOn && trailingToolRounds(c.messages) < MAX_TOOL_ROUNDS ? buildTools() : null;
-  if (toolSet && !caps.includes('tools')) { if (!state.warnedTools) toast(`${c.model} does not support tools — answering without them`); state.warnedTools = true; }
+  if (toolSet && !caps.includes('tools')) { if (!state.warnedTools) toast(`${useModel} does not support tools — answering without them`); state.warnedTools = true; }
   const useTools = toolSet && caps.includes('tools') ? toolSet : null;
   renderAll();
   const el = $('#messages').lastElementChild;
@@ -935,13 +954,31 @@ async function generate(fork) {
   try {
     const r = await fetch('/api/chat', {
       method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: c.model, system, ...(canThink ? { think: $('#thinkToggle').checked } : {}), ...(useTools ? { tools: useTools.defs } : {}), options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
+      body: JSON.stringify({ model: useModel, system, ...(canThink ? { think: $('#thinkToggle').checked } : {}), ...(useTools ? { tools: useTools.defs } : {}), options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
         messages: wire }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = '', raf = 0;
     const flush = () => { raf = 0; paint(el, reply, true); $('#messages').scrollTop = $('#messages').scrollHeight; };
+    const onChunk = (j) => {
+      if (j.error) throw new Error(j.error);
+      if (j.message) {
+        reply.content += j.message.content || '';
+        if (j.message.thinking) {
+          if (!thinkT0.has(reply)) thinkT0.set(reply, performance.now());
+          reply.thinking = (reply.thinking || '') + j.message.thinking;
+        }
+        if (j.message.content && thinkT0.has(reply) && reply.thinkMs == null) reply.thinkMs = Math.round(performance.now() - thinkT0.get(reply));
+        if (j.message.content) tokens++;
+        if (j.message.tool_calls) reply.toolCalls = (reply.toolCalls || []).concat(j.message.tool_calls.map((tc) => registerCall(tc, useTools && useTools.map)));
+      }
+      // The final chunk carries Ollama's token counters (nanoseconds for the durations).
+      if (j.done && (j.eval_count || j.prompt_eval_count)) {
+        reply.stats = { prompt_eval_count: j.prompt_eval_count || 0, eval_count: j.eval_count || 0, eval_duration: j.eval_duration || 0, total_duration: j.total_duration || 0 };
+      }
+      if (!raf) raf = requestAnimationFrame(flush);
+    };
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -949,38 +986,34 @@ async function generate(fork) {
       let nl;
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-        if (!line) continue;
-        const j = JSON.parse(line);
-        if (j.error) throw new Error(j.error);
-        if (j.message) {
-          reply.content += j.message.content || '';
-          if (j.message.thinking) {
-            if (!thinkT0.has(reply)) thinkT0.set(reply, performance.now());
-            reply.thinking = (reply.thinking || '') + j.message.thinking;
-          }
-          if (j.message.content && thinkT0.has(reply) && reply.thinkMs == null) reply.thinkMs = Math.round(performance.now() - thinkT0.get(reply));
-          if (j.message.content) tokens++;
-          if (j.message.tool_calls) reply.toolCalls = (reply.toolCalls || []).concat(j.message.tool_calls.map((tc) => registerCall(tc, useTools && useTools.map)));
-        }
-        if (!raf) raf = requestAnimationFrame(flush);
+        if (line) onChunk(JSON.parse(line));
       }
     }
+    if (buf.trim()) onChunk(JSON.parse(buf.trim())); // last line without a trailing newline
   } catch (e) {
     if (e.name !== 'AbortError') reply.error = String(e.message || e);
   }
   state.streaming = null; setBusy(false);
   if (reply.toolCalls && (reply.error || ac.signal.aborted)) delete reply.toolCalls; // never run tools from a failed/stopped turn
-  if (!reply.content && !reply.error && !reply.thinking && !reply.toolCalls) { c.messages.pop(); if (fork) undoFork(fork); }
+  if (!reply.content && !reply.error && !reply.thinking && !reply.toolCalls) { c.messages.pop(); if (ownsFork) undoFork(fork); }
   if (reply.thinking && reply.thinkMs == null && thinkT0.has(reply)) reply.thinkMs = Math.round(performance.now() - thinkT0.get(reply));
   paint(el, reply, false);
   renderAll();
   if (reply.toolCalls) {
     const go = await runToolCalls(c, reply);
     await persist().catch(() => {});
-    if (go) return generate(); // let the model answer using the tool results
+    // The follow-up answer belongs to the same branch and the same model as the answer
+    // that asked for the tool — a retry with another model must not fall back to the
+    // chat's model here.
+    if (go) return generate(fork, useModel);
   }
   if (!reply.error) maybeAutoOpenArtifact();
-  if (tokens) $('#status').textContent = `${tokens} chunks in ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+  if (reply.stats && reply.stats.eval_count) {
+    const secs = reply.stats.eval_duration / 1e9; // Ollama reports nanoseconds
+    const tps = secs > 0 ? (reply.stats.eval_count / secs).toFixed(1) : '0';
+    $('#status').textContent = `${tps} tok/s · ${reply.stats.eval_count} tokens · ${(reply.stats.total_duration / 1e9).toFixed(1)}s`;
+  } else if (tokens) $('#status').textContent = `${tokens} chunks in ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+  if (hooks.onReply) hooks.onReply(reply, c);
   persist().then(() => { if (c.id && !c.titled && reply.content && !state.temp) autoTitle(c, reply); }).catch((e) => toast('Save failed: ' + e.message));
 }
 
@@ -1077,6 +1110,7 @@ $('#messages').addEventListener('click', async (e) => {
   else if (act === 'regen') { const spec = beginFork(idx); await generate(spec); }
   else if (act === 'vprev') switchBranch(idx, -1);
   else if (act === 'vnext') switchBranch(idx, 1);
+  else if (hooks.onMsgAction) await hooks.onMsgAction(act, m, idx);
 });
 
 // ---- boot ----------------------------------------------------------------
@@ -1088,7 +1122,7 @@ state.ready = (async function init() {
   try {
     const { models } = await api('/models');
     state.models = models;
-    sel.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
+    sel.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}${m.cloud ? ' ☁' : ''}</option>`).join('');
     const saved = pref('model'); if (saved && models.some((m) => m.id === saved)) sel.value = saved;
     updateThinkUI();
     if (!models.length) $('#status').textContent = 'No models found. Run: ollama pull <model>';

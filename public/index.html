@@ -40,8 +40,26 @@
       <label class="toggle" id="thinkWrap" title="Let reasoning models think before answering"><input type="checkbox" id="thinkToggle" checked> Thinking</label>
       <label class="toggle" title="Temporary chats are not saved"><input type="checkbox" id="tempToggle"> Temporary</label>
       <button id="toolsBtn" class="ghost" title="Tools &amp; MCP servers">🔧 Tools</button>
+      <button id="usageBtn" class="ghost" title="Token usage">📊 Usage</button>
+      <button id="findBtn" class="ghost" title="Find in conversation">🔍</button>
+      <button id="exportChatBtn" class="ghost" title="Export this chat">⤓</button>
+      <button id="compareBtn" class="ghost" title="Compare two models">⚖</button>
       <button id="controlsBtn" class="ghost">Controls</button>
     </header>
+
+    <div id="tabStrip" class="tabstrip" hidden>
+      <button id="tabPrev" class="icon" title="Previous tab">‹</button>
+      <div id="tabList" class="tablist"></div>
+      <button id="tabNext" class="icon" title="Next tab">›</button>
+    </div>
+
+    <div id="findBar" class="findbar" hidden>
+      <input id="findInput" type="search" placeholder="Find in conversation…" autocomplete="off" aria-label="Find in conversation">
+      <span id="findCount">0/0</span>
+      <button id="findPrev" class="icon" title="Previous match">‹</button>
+      <button id="findNext" class="icon" title="Next match">›</button>
+      <button id="findClose" class="icon" title="Close">✕</button>
+    </div>
 
     <section id="messages" aria-live="polite"></section>
 
@@ -98,6 +116,11 @@
     <label>Max tokens (blank = unlimited)
       <input id="numPredict" type="number" min="1" placeholder="unlimited">
     </label>
+    <label>Voice
+      <select id="voiceSel"></select>
+    </label>
+    <label class="check"><input type="checkbox" id="autoRead"> Read replies aloud</label>
+    <label class="check"><input type="checkbox" id="contLast"> Continue last chat when Lumen starts</label>
   </aside>
 </div>
 <dialog id="projDlg">
@@ -134,7 +157,7 @@
       <textarea id="stPrompt" rows="3" maxlength="2000" placeholder="How should replies sound? e.g. Talk like a pirate and keep it short."></textarea>
       <div class="addrow"><span class="spacer"></span><button type="button" id="stCancel" class="ghost" hidden>Cancel edit</button><button type="button" id="stSave" class="ghost">Add style</button></div>
     </div>
-    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="setClose" class="primary">Done</button></div>
+    <div class="dlg-actions"><button type="button" id="troubleBtn" class="ghost">Troubleshooting…</button><span class="spacer"></span><button type="button" id="setClose" class="primary">Done</button></div>
   </div>
 </dialog>
 <dialog id="toolsDlg">
@@ -165,6 +188,77 @@
     <div class="dlg-actions"><span class="spacer"></span><button type="button" id="toolsClose" class="primary">Done</button></div>
   </div>
 </dialog>
+<dialog id="troubleDlg">
+  <div>
+    <h2>Troubleshooting</h2>
+    <div id="diagBox" class="diagbox"></div>
+    <div id="diagModels" class="sub"></div>
+    <h3>Server log</h3>
+    <pre id="logBox" class="logbox"></pre>
+    <div class="dlg-actions">
+      <button type="button" id="diagCopy" class="ghost">Copy report</button>
+      <button type="button" id="logRefresh" class="ghost">Refresh</button>
+      <span class="spacer"></span>
+      <button type="button" id="troubleClose" class="primary">Close</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="modelPickDlg">
+  <div>
+    <h2>Try another model</h2>
+    <p class="sub">The answer is added as a new version — the old one stays available.</p>
+    <div id="modelPickList" class="modellist"></div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="modelPickCancel" class="ghost">Cancel</button></div>
+  </div>
+</dialog>
+<dialog id="compareDlg">
+  <div>
+    <h2>Compare two models</h2>
+    <div class="cmp-row">
+      <select id="cmpModelA"></select>
+      <select id="cmpModelB"></select>
+      <button type="button" id="cmpStart" class="primary">Compare</button>
+    </div>
+    <p class="sub" id="cmpPrompt"></p>
+    <div class="cmp-grid">
+      <div class="cmp-col">
+        <div class="cmp-head"><span id="cmpNameA"></span><button type="button" id="cmpKeepA" class="ghost" disabled>Keep this one</button></div>
+        <div class="cmp-out" id="cmpOutA"></div>
+      </div>
+      <div class="cmp-col">
+        <div class="cmp-head"><span id="cmpNameB"></span><button type="button" id="cmpKeepB" class="ghost" disabled>Keep this one</button></div>
+        <div class="cmp-out" id="cmpOutB"></div>
+      </div>
+    </div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="cmpClose" class="ghost">Close</button></div>
+  </div>
+</dialog>
+<dialog id="exportDlg">
+  <div>
+    <h2>Export chat</h2>
+    <label class="check"><input type="checkbox" id="expThinking"> Include thinking</label>
+    <label class="check"><input type="checkbox" id="expTools"> Include tool calls</label>
+    <pre id="expPreview" class="exppreview"></pre>
+    <div class="dlg-actions">
+      <button type="button" id="expCopy" class="ghost">Copy as Markdown</button>
+      <button type="button" id="expPrint" class="ghost">Print / PDF</button>
+      <span class="spacer"></span>
+      <button type="button" id="expDownload" class="primary">Download Markdown</button>
+      <button type="button" id="expClose" class="ghost">Close</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="usageDlg">
+  <div>
+    <h2>Token usage</h2>
+    <div id="usageTotals" class="usage-totals"></div>
+    <h3>By model</h3>
+    <div id="usageModels"></div>
+    <h3>By day</h3>
+    <div id="usageDays"></div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="usageClose" class="primary">Close</button></div>
+  </div>
+</dialog>
 <dialog id="palette" class="palette">
   <input id="palIn" placeholder="Type a command or search chats…" autocomplete="off" spellcheck="false" aria-label="Command palette">
   <div id="palList" role="listbox"></div>
@@ -183,5 +277,6 @@
 </dialog>
 <div id="toast" role="status"></div>
 <script src="/app.js"></script>
+<script src="/features/quickwins.js"></script>
 </body>
 </html>

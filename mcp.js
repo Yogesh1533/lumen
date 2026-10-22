@@ -31,12 +31,19 @@ const withTimeout = (p, ms, what) => Promise.race([
   p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} timed out after ${ms / 1000}s`)), ms)),
 ]);
 
+// The last lines a server wrote to stderr. It may hold secrets, so it is only shown in
+// the Tools dialog — it never goes into the server log the browser can read.
+function stderrTail(lines) {
+  return (lines || []).join('').trim().split('\n').slice(-3).join(' ').slice(0, 300);
+}
+
 class McpManager {
   constructor() { this.conns = new Map(); }
 
   info(id) {
     const c = this.conns.get(id);
-    return c ? { status: c.status, error: c.error, tools: c.tools } : { status: 'disconnected', error: null, tools: [] };
+    if (!c) return { status: 'disconnected', error: null, tools: [], stderr: '' };
+    return { status: c.status, error: c.error, tools: c.tools, stderr: stderrTail(c.stderr) };
   }
 
   async connect(cfg) {
@@ -61,8 +68,7 @@ class McpManager {
       entry.status = 'connected';
     } catch (e) {
       entry.status = 'error';
-      const tail = entry.stderr.join('').trim().split('\n').slice(-3).join(' ').slice(0, 300);
-      entry.error = String(e.message || e).slice(0, 300) + (tail ? ` — ${tail}` : '');
+      entry.error = String(e.message || e).slice(0, 300); // the stderr tail stays out of the log
       try { await entry.client.close(); } catch { /* already gone */ }
     }
     return this.info(cfg.id);
