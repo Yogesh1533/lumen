@@ -239,6 +239,7 @@ $('#expPrint').onclick = () => { $('#exportDlg').close(); setTimeout(() => windo
 // "Try another model" forks the reply and answers it with a different model; the old
 // answer stays available as another version of the same message.
 function openModelPick(idx) {
+  if (!state.models.length) { toast('No models found — is Ollama running?'); return; }
   const box = $('#modelPickList');
   box.innerHTML = '';
   for (const m of state.models) {
@@ -266,6 +267,7 @@ function modelOptions() {
   return state.models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}${m.cloud ? ' ☁' : ''}</option>`).join('');
 }
 function openCompare() {
+  if (!state.models.length) { toast('No models found — is Ollama running?'); return; }
   const opts = modelOptions();
   $('#cmpModelA').innerHTML = opts;
   $('#cmpModelB').innerHTML = opts;
@@ -476,7 +478,10 @@ state.ready.then(async () => {
   if (pref('contLast') === '1') {
     try {
       const list = await api('/chats');
-      if (list.length) { await openChat(list[0].id); return; }
+      // The chat list is sorted with pinned chats first, so "the last chat" is the
+      // most recently updated one — not simply the first entry.
+      const recent = list.reduce((a, b) => ((b.updated || 0) > (a.updated || 0) ? b : a), list[0]);
+      if (recent) { await openChat(recent.id); return; }
     } catch { /* fall back to the restored tab */ }
   }
   const active = chatTabs.list.find((t) => t.key === chatTabs.active);

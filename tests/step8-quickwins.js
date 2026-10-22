@@ -1,5 +1,6 @@
 // Step 8 — quick wins: usage stats, read aloud, find, export, chat tabs, retry/compare, troubleshooting.
 const { launch, sleep } = require('./lib/cdplib');
+const { runHarnessChecks } = require('./lib/harness-checks');
 
 // A fake speechSynthesis so "read aloud" can be tested without a real voice.
 const FAKE_SPEECH = `
@@ -16,6 +17,8 @@ const FAKE_SPEECH = `
 (async () => {
   const h = await launch('http://localhost:3101', 9345, { preScript: FAKE_SPEECH });
   const { ev, ok, waitFor, shot } = h;
+  // The harness itself: freeing a debug port must not kill processes that are not ours.
+  await runHarnessChecks(ok);
   await ev(`document.querySelector('#thinkToggle').click(); 1`); // thinking off: faster
   const model = await ev(`document.querySelector('#modelSelect').value`);
 
@@ -131,6 +134,20 @@ const FAKE_SPEECH = `
   ok('the app comes back with the tabs restored', await waitFor(`typeof chatTabs !== 'undefined' && chatTabs.list.length === 2`, 15000), await ev(`typeof chatTabs !== 'undefined' ? JSON.stringify(chatTabs.list) : 'no chatTabs'`));
   ok('"continue last chat" opens the most recent chat', await waitFor(`state.chat && state.chat.id === ${JSON.stringify(idB)}`, 15000), await ev(`state.chat ? state.chat.id : null`));
 
+  // ---- "continue last chat" must not follow the pinned chats --------------------------
+  const pinnedId = await mkChat('Pinned Chat');
+  const recentId = await mkChat('Recent Chat');
+  await ev(`fetch('/api/chats/${pinnedId}', { method: 'PUT', headers: {'content-type':'application/json'}, body: JSON.stringify({ pinned: true }) }).then(r => r.json()).then(c => c.id)`);
+  await sleep(40);
+  await ev(`fetch('/api/chats/${recentId}', { method: 'PUT', headers: {'content-type':'application/json'}, body: JSON.stringify({ title: 'Recent Chat' }) }).then(r => r.json()).then(c => c.id)`);
+  const chatList = JSON.parse(await ev(`fetch('/api/chats').then(r => r.json()).then(l => JSON.stringify(l))`));
+  ok('a pinned chat is sorted to the top of the chat list', chatList[0].id === pinnedId, chatList[0].id);
+  ok('the pinned chat is not the most recently updated one',
+    chatList.find((c) => c.id === pinnedId).updated < chatList.find((c) => c.id === recentId).updated);
+  await h.cmd('Page.reload');
+  ok('"continue last chat" opens the most recently updated chat, not the pinned one',
+    await waitFor(`state.chat && state.chat.id === ${JSON.stringify(recentId)}`, 15000), await ev(`state.chat ? state.chat.id : null`));
+
   // ---- retry with another model + compare --------------------------------------------
   const other = 'gemma4:12b';
   await ev(`newChat(); 1`);
@@ -146,6 +163,44 @@ const FAKE_SPEECH = `
   ok('the old answer is kept as another version', (await ev(`state.chat.messages[1].fk.tails.length`)) === 2 && (await ev(`state.chat.messages[1].fk.tails[0][0].model`)) === firstModel, await ev(`JSON.stringify(state.chat.messages[1].fk.tails.map(t => t && t[0] && t[0].model))`));
   ok('the version switcher shows two versions', /2\/2/.test(await ev(`document.querySelector('#messages .msg.assistant .vers').textContent`)), await ev(`document.querySelector('#messages .msg.assistant .vers')?.textContent`));
 
+  // ---- the answer that follows a tool call stays on the chosen model --------------------
+  // A fake Ollama stream: the first answer calls a tool, the second one is the follow-up.
+  await ev(`(() => {
+    window.__realFetch = window.fetch;
+    window.__fakeCalls = 0;
+    window.fetch = async (url, opts) => {
+      if (!/\\/api\\/chat(\\?|$)/.test(String(url))) return window.__realFetch(url, opts);
+      window.__fakeCalls++;
+      const lines = window.__fakeCalls === 1
+        ? [{ message: { role: 'assistant', content: '' } },
+           { message: { role: 'assistant', content: '', tool_calls: [{ function: { name: 'test__echo', arguments: { q: 'x' } } }] } }]
+        : [{ message: { role: 'assistant', content: 'the follow-up answer' } }];
+      const body = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(lines.map((l) => JSON.stringify(l)).join('\\n') + '\\n')); c.close(); } });
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/x-ndjson' } });
+    };
+  })(); 1`);
+  await ev(`newChat(); 1`);
+  await ev(`state.chat.messages.push({ role: 'user', content: 'hello there' }, { role: 'assistant', content: 'the old answer', model: ${JSON.stringify(model)} }); renderAll(); 1`);
+  await ev(`document.querySelector('#messages .msg.assistant [data-act=regen2]').click(); 1`);
+  await ev(`(() => { [...document.querySelectorAll('#modelPickList button')].find(x => x.dataset.model === ${JSON.stringify(other)}).click(); })(); 1`);
+  ok('the answer that follows the tool call arrives', await waitFor(`!state.streaming && state.chat.messages.length >= 3 && state.chat.messages.at(-1).content.length > 0`, 30000),
+    await ev(`state.chat.messages.length + ' messages, model ' + (state.chat.messages.at(-1) || {}).model`));
+  ok('the follow-up answer comes from the chosen model', (await ev(`state.chat.messages.at(-1).model`)) === other, await ev(`state.chat.messages.at(-1).model`));
+  ok('the answer that follows the tool call stays inside the fork',
+    (await ev(`!!state.chat.messages[1].fk`)) && (await ev(`state.chat.messages[1].fk.tails.length`)) === 2,
+    await ev(`JSON.stringify(state.chat.messages[1] && state.chat.messages[1].fk ? state.chat.messages[1].fk.tails.map((t) => t && t[0] && t[0].model) : null)`));
+  await ev(`window.fetch = window.__realFetch; 1`);
+
+  // ---- the model choosers need a model ------------------------------------------------
+  await ev(`window.__savedModels = state.models; state.models = []; 1`);
+  await ev(`document.querySelector('#messages .msg.assistant [data-act=regen2]').click(); 1`); await sleep(300);
+  ok('the model chooser does not open when no model is available', await ev(`!document.querySelector('#modelPickDlg').open`));
+  await ev(`document.querySelector('#compareBtn').click(); 1`); await sleep(300);
+  ok('the compare dialog does not open when no model is available', await ev(`!document.querySelector('#compareDlg').open`));
+  ok('the app says that no models were found', /no models/i.test(await ev(`document.querySelector('#toast').textContent`)),
+    await ev(`document.querySelector('#toast').textContent`));
+  await ev(`state.models = window.__savedModels; 1`);
+
   // ---- compare two models -------------------------------------------------------------
   await ev(`document.querySelector('#compareBtn').click(); 1`);
   ok('the compare dialog opens', await ev(`!!document.querySelector('#compareDlg') && document.querySelector('#compareDlg').open`));
@@ -160,6 +215,10 @@ const FAKE_SPEECH = `
   await ev(`document.querySelector('#cmpClose').click(); 1`);
 
   // ---- troubleshooting ------------------------------------------------------------------
+  // A second chat with a marker of its own: no report may show it.
+  const MARKER = 'zebra-trombone-mango-9f3a7c';
+  const markerChat = await ev(`fetch('/api/chats', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ title: 'Marker Chat' }) }).then(r => r.json()).then(c => c.id)`);
+  await ev(`fetch('/api/chats/${markerChat}', { method: 'PUT', headers: {'content-type':'application/json'}, body: JSON.stringify({ messages: [{ role: 'user', content: ${JSON.stringify(MARKER)} }] }) }).then(r => r.json()).then(c => c.id)`);
   await ev(`document.querySelector('#settingsBtn').click(); 1`); await sleep(300);
   ok('the settings dialog has a troubleshooting entry', await ev(`!!document.querySelector('#troubleBtn')`));
   await ev(`document.querySelector('#troubleBtn').click(); 1`); await sleep(1000);
@@ -169,13 +228,54 @@ const FAKE_SPEECH = `
   ok('it shows the data folder', box.includes(diag.dataDir), box.slice(0, 200).replace(/\n/g, ' '));
   ok('it shows the versions and the Ollama status', /node/i.test(box) && /ollama/i.test(box), box.slice(0, 200).replace(/\n/g, ' '));
   ok('it lists the Ollama models', (await ev(`document.querySelector('#diagModels')?.textContent || ''`)).includes(diag.ollama.models[0]));
-  ok('the diagnostic report has no chat content', !/kiwi|Reply with exactly/.test(JSON.stringify(diag)), JSON.stringify(diag).slice(0, 200));
+  const diagText = JSON.stringify(diag);
+  ok('the diagnostic report has no chat content', !/kiwi|Reply with exactly/.test(diagText) && !diagText.includes(MARKER), diagText.slice(0, 200));
   ok('the diagnostic report knows Ollama and the data folder', !!diag.dataDir && diag.ollama.reachable && diag.ollama.models.length >= 1, JSON.stringify(diag).slice(0, 200));
   const logs = JSON.parse(await ev(`fetch('/api/logs').then(r => r.json()).then(l => JSON.stringify(l))`));
+  const logText = JSON.stringify(logs);
   ok('the server log is available', Array.isArray(logs.lines));
-  ok('the server log has no chat content', !/kiwi/.test(JSON.stringify(logs)), JSON.stringify(logs).slice(0, 200));
+  ok('the server log has no chat content', !/kiwi|Reply with exactly/.test(logText) && !logText.includes(MARKER), logText.slice(0, 200));
+  // The strong check: no part of any stored message may show up in the report or the log.
+  const allChats = JSON.parse(await ev(`fetch('/api/chats/export').then(r => r.json()).then(l => JSON.stringify(l))`));
+  const storedTexts = [];
+  for (const c of allChats) for (const m of (c.messages || [])) {
+    const t = String(m.content || '').trim();
+    if (t.length >= 12) storedTexts.push(t);
+  }
+  const report = diagText + logText;
+  const leaked = storedTexts.filter((t) => report.includes(t) || report.includes(t.slice(0, 12)) || report.includes(t.slice(-12)));
+  ok('the report and the log contain no part of any stored message', leaked.length === 0,
+    leaked.slice(0, 3).map((t) => t.slice(0, 40)).join(' | ').slice(0, 200));
   ok('the log view is filled', (await ev(`document.querySelector('#logBox')?.textContent.length`)) > 0);
   await ev(`document.querySelector('#troubleClose').click(); 1`);
+
+  // ---- the server log must not carry the stderr of an MCP server ------------------------
+  // A second Lumen instance whose MCP server writes a secret to stderr and dies.
+  const { spawn } = require('child_process');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const SECRET = 'sk-MCP-STDERR-4f8a2b91';
+  const leakyScript = path.join(os.tmpdir(), 'lumen-leaky-mcp.js');
+  fs.writeFileSync(leakyScript, `process.stderr.write('starting up with token ${SECRET}\\n');\nprocess.exit(1);\n`);
+  const mcpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lumen-mcp-log-'));
+  fs.writeFileSync(path.join(mcpDir, 'settings.json'), JSON.stringify({
+    mcpServers: [{ id: 'leaky', name: 'Leaky Server', transport: 'stdio', command: `${process.execPath} ${leakyScript}`, enabled: true, env: {} }],
+  }));
+  const srv2 = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT: '3199', LUMEN_DATA: path.join(mcpDir, 'chats.json') }, stdio: 'ignore' });
+  let mcpLog = '';
+  for (let i = 0; i < 60; i++) {
+    await sleep(250);
+    try {
+      const r = await fetch('http://127.0.0.1:3199/api/logs');
+      mcpLog = JSON.stringify(await r.json());
+      if (/Leaky Server/.test(mcpLog)) break;
+    } catch { /* the server is not up yet */ }
+  }
+  ok('the MCP server shows up in the server log', /Leaky Server/.test(mcpLog), mcpLog.slice(0, 200));
+  ok('the server log does not contain the stderr of the MCP server', !mcpLog.includes(SECRET), mcpLog.slice(0, 300));
+  try { srv2.kill('SIGKILL'); } catch { /* gone */ }
+  fs.rmSync(mcpDir, { recursive: true, force: true });
 
   h.close();
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

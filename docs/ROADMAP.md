@@ -121,7 +121,7 @@ For every step: branch, build, add `tests/stepN-*.js`, run `tests/run.sh`, updat
 - **Troubleshooting:** Settings > Troubleshooting with server log view, diagnostic report (versions, Ollama reachability, model list, no chat content), data folder path.
 - Tests: usage numbers stored; `speechSynthesis` mocked; find counts; export content; tab behaviours; model-switch regenerate creates a fork with a different model.
 
-**Done** on branch `step-8-quickwins` (tests: `tests/step8-quickwins.js`, 47 assertions, `tests/run.sh 8`).
+**Done** on branch `step-8-quickwins` (tests: `tests/step8-quickwins.js` — 83 assertions — plus `tests/lib/harness-checks.js` — 8 assertions; `tests/run.sh 8`).
 Handoff notes:
 - The step-8 UI lives in `public/features/quickwins.js`, a classic script loaded after `app.js`; it uses the new `hooks` object in `app.js`
   (`onRender`, `onMsgAction`, `onOpenChat`, `onNewChat`, `onReply`) so `app.js` stays untouched. Later steps can add their own `public/features/*.js` the same way.
@@ -133,6 +133,20 @@ Handoff notes:
 - Preferences (auto-read, voice, continue-last-chat, open tabs) live in `localStorage` via `pref()`; the server `settings` schema is untouched.
 - Not covered by the tests: real speech (the tests mock `speechSynthesis`), the print-to-PDF result (only the print stylesheet is asserted),
   and the real clipboard in browsers that block it (the test grants the permission).
+
+Fix round 1 (same branch, second commit):
+- The CDP harness (`tests/lib/cdplib.js`) frees a debug port by looking at the command line of every listener: only browsers that carry the harness
+  profile `chrome-prof-<port>` are stopped (SIGTERM, then SIGKILL after a grace period), and the port is waited on until it is free. A process that
+  belongs to somebody else is never killed — the run stops with a clear error instead. `lsof` is called without a shell, and Ctrl+C now stops the
+  browser too (the `exit` hook does not fire on a signal). The checks live in `tests/lib/harness-checks.js`.
+- "Continue last chat" now opens the most recently **updated** chat. `GET /api/chats` sorts pinned chats first, so `list[0]` was the pinned one.
+- The answer that follows a tool call now stays on the model the user picked and inside the branch it belongs to: `generate()` threads the fork spec
+  and the model into the follow-up (`generate(fork, useModel)`), and only the call that opens a branch may finish or undo it.
+- The troubleshooting assertions were widened: a second chat with a marker of its own must not show up in the diagnostic report or in the log, and no
+  part of any stored message may appear in either of them.
+- The stderr of an MCP server never reaches the server log any more. `mcp.js` keeps it apart from the error message; the log only shows the status
+  ("MCP <name>: error — details in Settings > Tools"), the stderr itself stays in the Tools dialog.
+- The model chooser and the compare dialog do not open when Ollama reports no models — they say so instead of starting with an empty list.
 
 ### Step 9: import from Claude Desktop
 - Detect the Claude config path per OS (macOS above; Windows `%APPDATA%\Claude`; Linux `~/.config/Claude`). Read-only parse of `mcpServers` (`command`, `args[]`, `env{}`).

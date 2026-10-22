@@ -7,9 +7,14 @@ const { launch, sleep } = require('./lib/cdplib');
   ok('thinking toggle visible for a reasoning model', !(await ev(`document.querySelector('#thinkWrap').hidden`)));
   // NB: a "one short sentence" prompt makes gemma4 skip its reasoning half the time (empty
   // `thinking` from Ollama even with think:true), so ask for a step-by-step explanation.
-  await ev(`send('Explain step by step why the sky appears blue.'); 1`);
+  // The model still skips it now and then, so try a few times before giving up.
   let sawLive = false;
-  for (let i = 0; i < 240 && !sawLive; i++) { await sleep(250); sawLive = await ev(`!!document.querySelector('details.think.live[open]')`); if (await ev('!state.streaming && state.chat.messages.length >= 2')) break; }
+  for (let attempt = 0; attempt < 3 && !sawLive; attempt++) {
+    await ev(`send('Explain step by step why the sky appears blue.'); 1`);
+    for (let i = 0; i < 240 && !sawLive; i++) { await sleep(250); sawLive = await ev(`!!document.querySelector('details.think.live[open]')`); if (await ev('!state.streaming && state.chat.messages.length >= 2')) break; }
+    await waitFor('!state.streaming && state.chat.messages.length >= 2', 180000); await sleep(1000);
+    if (!sawLive) sawLive = !!String(await ev(`(state.chat.messages.at(-1) || {}).thinking || ''`)).trim(); // the block may have closed too fast to catch it live
+  }
   ok('thinking block is open + live while the model thinks', sawLive);
   await waitFor('!state.streaming && state.chat.messages.length >= 2', 180000); await sleep(1000);
   ok('block collapses when the answer starts', (await ev(`document.querySelector('details.think').open`)) === false);

@@ -484,6 +484,7 @@ function renderMcp() {
       <button type="button" class="icon" data-a="rc" title="Reconnect">↻</button><button type="button" class="icon" data-a="rm" title="Remove">✕</button>`}</div>
       <div class="meta" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(where)}</div>
       ${srv.error ? `<div class="err">${esc(srv.error)}</div>` : ''}
+      ${srv.stderr ? `<details><summary>Server output (stderr)</summary><pre>${esc(srv.stderr)}</pre></details>` : ''}
       ${srv.tools.length ? `<details><summary>${srv.tools.length} tools</summary>${srv.tools.map((t) => `<div><b>${esc(t.name)}</b> ${esc(t.description).slice(0, 160)}</div>`).join('')}</details>` : ''}`;
     if (srv.builtin) { box.appendChild(d); continue; }
     d.querySelector('[data-a=en]').onchange = async (e) => { await mcpAct(() => api('/mcp/' + srv.id, { method: 'PUT', body: { enabled: e.target.checked } })); };
@@ -931,10 +932,13 @@ async function generate(fork, model) {
   c.model = $('#modelSelect').value; c.system = $('#systemPrompt').value.trim();
   // A retry with another model keeps the chat's model but answers this one message with `model`.
   const useModel = model || c.model;
-  if (!useModel) { if (fork) { undoFork(fork); renderAll(); } return toast('No model selected — is Ollama running?'); }
+  // Only the call that opens the branch may finish or undo it — a follow-up answer that
+  // follows a tool call continues the same branch.
+  const ownsFork = !!(fork && !fork.finished);
+  if (!useModel) { if (ownsFork) { undoFork(fork); renderAll(); } return toast('No model selected — is Ollama running?'); }
   const reply = { role: 'assistant', content: '', model: useModel, t: Date.now() };
   c.messages.push(reply);
-  if (fork) finishFork(fork, reply);
+  if (ownsFork) { finishFork(fork, reply); fork.finished = true; }
   const caps = (state.models.find((m) => m.id === useModel) || { caps: [] }).caps;
   const canThink = caps.includes('thinking');
   const toolSet = state.toolsOn && trailingToolRounds(c.messages) < MAX_TOOL_ROUNDS ? buildTools() : null;
@@ -991,14 +995,17 @@ async function generate(fork, model) {
   }
   state.streaming = null; setBusy(false);
   if (reply.toolCalls && (reply.error || ac.signal.aborted)) delete reply.toolCalls; // never run tools from a failed/stopped turn
-  if (!reply.content && !reply.error && !reply.thinking && !reply.toolCalls) { c.messages.pop(); if (fork) undoFork(fork); }
+  if (!reply.content && !reply.error && !reply.thinking && !reply.toolCalls) { c.messages.pop(); if (ownsFork) undoFork(fork); }
   if (reply.thinking && reply.thinkMs == null && thinkT0.has(reply)) reply.thinkMs = Math.round(performance.now() - thinkT0.get(reply));
   paint(el, reply, false);
   renderAll();
   if (reply.toolCalls) {
     const go = await runToolCalls(c, reply);
     await persist().catch(() => {});
-    if (go) return generate(); // let the model answer using the tool results
+    // The follow-up answer belongs to the same branch and the same model as the answer
+    // that asked for the tool — a retry with another model must not fall back to the
+    // chat's model here.
+    if (go) return generate(fork, useModel);
   }
   if (!reply.error) maybeAutoOpenArtifact();
   if (reply.stats && reply.stats.eval_count) {

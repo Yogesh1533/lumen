@@ -244,6 +244,12 @@ async function api(req, res, url) {
   // ---- MCP servers ----------------------------------------------------------
   if (parts[0] === 'mcp') {
     const view = (c) => ({ ...c, ...mcp.info(c.id) });
+    // The status of a server goes into the log — but never its stderr: that output may
+    // hold secrets and the log can be read by the browser.
+    const logStatus = (cfg, info) => {
+      if (info.status === 'connected') console.log(`MCP ${cfg.name}: connected (${info.tools.length} tools)`);
+      else console.warn(`MCP ${cfg.name}: ${info.status} — details in Settings > Tools`);
+    };
     const cleanCfg = (b, base = {}) => {
       const cfg = { ...base };
       if (b.name !== undefined) cfg.name = String(b.name).trim().slice(0, 40);
@@ -268,7 +274,7 @@ async function api(req, res, url) {
       let cfg;
       try { cfg = { id: crypto.randomUUID(), transport: 'stdio', enabled: true, env: {}, ...cleanCfg(await readBody(req)) }; } catch (e) { return send(res, 400, { error: e.message }); }
       settings.mcpServers.push(cfg); saveSettings();
-      if (cfg.enabled) await mcp.connect(cfg);
+      if (cfg.enabled) logStatus(cfg, await mcp.connect(cfg));
       return send(res, 200, view(cfg));
     }
     if (parts[0] === 'mcp' && id === 'call' && m === 'POST') {
@@ -285,12 +291,12 @@ async function api(req, res, url) {
     const idx = settings.mcpServers.findIndex((c) => c.id === id);
     if (idx < 0) return send(res, 404, { error: 'not found' });
     const cur = settings.mcpServers[idx];
-    if (parts[2] === 'reconnect' && m === 'POST') { await mcp.connect(cur); return send(res, 200, view(cur)); }
+    if (parts[2] === 'reconnect' && m === 'POST') { logStatus(cur, await mcp.connect(cur)); return send(res, 200, view(cur)); }
     if (m === 'PUT') {
       let next;
       try { next = cleanCfg(await readBody(req), cur); } catch (e) { return send(res, 400, { error: e.message }); }
       settings.mcpServers[idx] = next; saveSettings();
-      if (next.enabled) await mcp.connect(next); else await mcp.disconnect(next.id);
+      if (next.enabled) logStatus(next, await mcp.connect(next)); else await mcp.disconnect(next.id);
       return send(res, 200, view(next));
     }
     if (m === 'DELETE') {
@@ -448,6 +454,9 @@ http.createServer(async (req, res) => {
   }
 }).listen(PORT, '127.0.0.1', () => {
   console.log(`Lumen running at http://localhost:${PORT} (Ollama: ${OLLAMA})`);
-  for (const cfg of settings.mcpServers) if (cfg.enabled) mcp.connect(cfg).then((i) => console.log(`MCP ${cfg.name}: ${i.status}${i.error ? ' — ' + i.error : ` (${i.tools.length} tools)`}`));
+  for (const cfg of settings.mcpServers) if (cfg.enabled) mcp.connect(cfg).then((i) => {
+    if (i.status === 'connected') console.log(`MCP ${cfg.name}: connected (${i.tools.length} tools)`);
+    else console.warn(`MCP ${cfg.name}: ${i.status} — details in Settings > Tools`);
+  });
 });
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => mcp.closeAll().finally(() => process.exit(0)));

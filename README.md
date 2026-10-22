@@ -39,7 +39,7 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 - Export: download a chat as Markdown (optionally with thinking and tool calls), copy it as Markdown, or print it to PDF (a print stylesheet hides the app chrome)
 - Chat tabs: a tab strip over the open chats, next/previous tab, reopen the last closed tab (Ctrl/Cmd+Shift+T), and a "Continue last chat when Lumen starts" switch; the open tabs are remembered across reloads
 - Try another model: regenerate a reply with a different model (the old answer stays as another version), or compare two models side by side in the ⚖ dialog and keep the answer you prefer
-- Troubleshooting (🧠 → Troubleshooting…): the server's own log lines, a diagnostic report (versions, data folder, Ollama reachability and model list — never chat content) and a copy button for bug reports
+- Troubleshooting (🧠 → Troubleshooting…): the server's own log lines, a diagnostic report (versions, data folder, Ollama reachability and model list — never chat content) and a copy button for bug reports. The log shows the status of the MCP servers, never their output — that stays in the Tools dialog
 - Safe markdown rendering (code blocks with copy, lists, tables, quotes)
 
 ## API
