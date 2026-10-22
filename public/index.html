@@ -163,8 +163,15 @@
 <dialog id="toolsDlg">
   <div>
     <h2>Tools &amp; MCP servers</h2>
+    <div class="addrow">
+      <button type="button" id="claudeImportBtn" class="ghost">Import from Claude Desktop…</button>
+      <button type="button" id="mcpReloadAll" class="ghost">Reload all</button>
+    </div>
     <label class="check"><input type="checkbox" id="toolsOn"> Let the model use tools in chats <span class="sub">(the model must support tools; you approve each call)</span></label>
     <div id="mcpList"></div>
+    <h3>Tools</h3>
+    <p class="sub">A tool that is switched off is not sent to the model and cannot run.</p>
+    <div id="toolToggles"></div>
     <h3>Add a server</h3>
     <div class="warn">MCP servers are programs that run on this computer with your permissions. Only add servers you trust.</div>
     <div class="stform">
@@ -186,6 +193,54 @@
     <h3>Auto-approved tools</h3>
     <div id="allowList"></div>
     <div class="dlg-actions"><span class="spacer"></span><button type="button" id="toolsClose" class="primary">Done</button></div>
+  </div>
+</dialog>
+<dialog id="claudeDlg">
+  <div>
+    <h2>Import from Claude Desktop</h2>
+    <p class="sub">Lumen only reads Claude’s config. Nothing is added until you say so, and every server is checked with the same trust question as one you add by hand.</p>
+    <div class="diagrow"><span>Config</span><b id="claudePath"></b></div>
+    <h3>MCP servers</h3>
+    <div id="claudeList"></div>
+    <h3>Extensions</h3>
+    <div class="diagrow"><span>Folder</span><b id="claudeExtDir"></b></div>
+    <div id="claudeExt"></div>
+    <div class="addrow">
+      <input type="file" id="extFile" accept=".mcpb,.dxt,application/zip" aria-label="Extension bundle">
+      <span class="spacer"></span>
+    </div>
+    <div id="extForm" hidden>
+      <h3 id="extFormTitle"></h3>
+      <p class="sub" id="extFormNote"></p>
+      <div id="extFields"></div>
+      <div class="addrow"><button type="button" id="extCancel" class="ghost">Cancel</button><span class="spacer"></span><button type="button" id="extInstall" class="primary">Install</button></div>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" id="claudeRefresh" class="ghost">Refresh</button>
+      <span class="spacer"></span>
+      <button type="button" id="claudeClose" class="primary">Done</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="envDlg">
+  <div>
+    <h2>Environment variables</h2>
+    <p class="sub">The values are secrets: they stay on the server and are never shown again. Type a new value to replace one.</p>
+    <div class="diagrow"><span>Server</span><b id="envTitle"></b></div>
+    <div id="envFields"></div>
+    <div class="dlg-actions"><button type="button" id="envCancel" class="ghost">Cancel</button><span class="spacer"></span><button type="button" id="envSave" class="primary">Save</button></div>
+  </div>
+</dialog>
+<dialog id="mcpLogsDlg">
+  <div>
+    <h2>Server log</h2>
+    <div class="diagrow"><span>Server</span><b id="logTitle"></b></div>
+    <pre id="logBox2" class="logbox"></pre>
+    <div class="dlg-actions">
+      <button type="button" id="logRefresh2" class="ghost">Refresh</button>
+      <span class="spacer"></span>
+      <button type="button" id="logClose2" class="primary">Close</button>
+    </div>
   </div>
 </dialog>
 <dialog id="troubleDlg">
@@ -278,5 +333,6 @@
 <div id="toast" role="status"></div>
 <script src="/app.js"></script>
 <script src="/features/quickwins.js"></script>
+<script src="/features/claudeimport.js"></script>
 </body>
 </html>

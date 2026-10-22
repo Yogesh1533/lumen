@@ -7,6 +7,7 @@ const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/cli
 const CONNECT_TIMEOUT = 20000;
 const CALL_TIMEOUT = 60000;
 const MAX_RESULT_CHARS = 12000;
+const STDERR_LINES = 200; // how many stderr lines are kept per server (the log viewer)
 
 // Split a command line into argv without invoking a shell (no expansion, no injection).
 function shellSplit(str) {
@@ -34,7 +35,18 @@ const withTimeout = (p, ms, what) => Promise.race([
 // The last lines a server wrote to stderr. It may hold secrets, so it is only shown in
 // the Tools dialog — it never goes into the server log the browser can read.
 function stderrTail(lines) {
-  return (lines || []).join('').trim().split('\n').slice(-3).join(' ').slice(0, 300);
+  // The lines are kept without their newline, so they are joined again here.
+  return (lines || []).join('\n').trim().split('\n').slice(-3).join(' ').slice(0, 300);
+}
+
+// One stderr line with a timestamp, kept in a small ring buffer per server.
+function pushStderr(entry, text) {
+  const line = String(text).replace(/\r$/, '');
+  if (!line.trim()) return;
+  entry.stderr.push(line);
+  if (entry.stderr.length > 20) entry.stderr.shift();
+  entry.stderrLines.push({ t: Date.now(), text: line });
+  if (entry.stderrLines.length > STDERR_LINES) entry.stderrLines.shift();
 }
 
 class McpManager {
@@ -46,18 +58,35 @@ class McpManager {
     return { status: c.status, error: c.error, tools: c.tools, stderr: stderrTail(c.stderr) };
   }
 
+  // The stderr ring buffer of a server (the log viewer).
+  logs(id) {
+    const c = this.conns.get(id);
+    return { lines: c ? c.stderrLines : [] };
+  }
+
   async connect(cfg) {
     await this.disconnect(cfg.id);
-    const entry = { status: 'connecting', error: null, tools: [], client: null, stderr: [] };
+    const entry = { status: 'connecting', error: null, tools: [], client: null, stderr: [], stderrLines: [] };
     this.conns.set(cfg.id, entry);
     try {
       let transport;
       if (cfg.transport === 'http') transport = new StreamableHTTPClientTransport(new URL(cfg.url));
       else {
-        const [command, ...args] = shellSplit(cfg.command);
+        // A config with its own args keeps them as they are (a path with a space stays one
+        // argument); an older config has only a command line, which is split.
+        const [command, ...args] = Array.isArray(cfg.args) ? [cfg.command, ...cfg.args] : shellSplit(cfg.command || '');
         if (!command) throw new Error('Empty command');
         transport = new StdioClientTransport({ command, args, env: { ...(cfg.env || {}) }, stderr: 'pipe' });
-        if (transport.stderr) transport.stderr.on('data', (d) => { entry.stderr.push(String(d)); if (entry.stderr.length > 20) entry.stderr.shift(); });
+        if (transport.stderr) {
+          let pending = '';
+          transport.stderr.on('data', (d) => {
+            pending += String(d);
+            const parts = pending.split('\n');
+            pending = parts.pop();
+            for (const line of parts) pushStderr(entry, line);
+            if (pending.length > 2000) { pushStderr(entry, pending); pending = ''; }
+          });
+        }
       }
       const client = new Client({ name: 'lumen', version: '1.0.0' });
       entry.client = client;

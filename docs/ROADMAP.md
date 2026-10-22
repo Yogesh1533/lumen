@@ -13,7 +13,11 @@ Step 8 (quick wins) is built, tested and committed on branch `step-8-quickwins` 
 token usage and a usage dialog, read aloud, find in conversation, Markdown export, chat tabs,
 try another model and side-by-side compare, and a troubleshooting dialog with a diagnostic report.
 
-**Next: steps 9 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 9 (import from Claude Desktop) is built, tested and committed on branch `step-9-claude-import` (not merged yet):
+a review dialog for Claude's MCP servers, extension bundles (`.mcpb`/`.dxt`), a switch per tool,
+a per-server log viewer and "Reload all".
+
+**Next: steps 10 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -24,6 +28,9 @@ try another model and side-by-side compare, and a troubleshooting dialog with a 
 | `webtools.js` | Built-in `fetch_page` / `web_search` with SSRF protection |
 | `public/app.js` | The whole single-page UI (vanilla JS, no build step) |
 | `public/features/quickwins.js` | Step-8 UI (usage, read aloud, find, export, tabs, compare, troubleshooting); a classic script loaded after `app.js`, sharing its global scope |
+| `public/features/claudeimport.js` | Step-9 UI (import dialog, extension form, tool switches, log viewer); a classic script loaded after `app.js` |
+| `claude.js` | Claude Desktop's config and extensions — **read-only** (never writes in Claude's folders) |
+| `zip.js` | Dependency-free reader for `.mcpb`/`.dxt` bundles, with the limits and the path checks |
 | `public/index.html`, `style.css` | Markup and styles |
 | `bin/lumen-app.js` | Opens Lumen in a Chrome/Edge app window |
 | `tests/` | Browser tests driven over CDP (see section 6) |
@@ -170,6 +177,64 @@ Fix round 2 (same branch, third commit — test harness only, no change to the s
 - **Per-tool toggles:** checkbox per tool in the Tools dialog; disabled tools are not sent to the model. Store in Lumen's settings (do not read Claude's toggles file).
 - **MCP logs and reload:** per-server stderr ring buffer at `GET /api/mcp/:id/logs`, a log viewer, and "Reload all".
 - Tests: fixture config + fixture `.mcpb` built in the test (zip with a tiny node MCP server); toggles remove a tool from the `tools` payload; placeholder substitution; path traversal in zip entries rejected; zip size limit.
+
+**Done** on branch `step-9-claude-import` (tests: `tests/step9-claude-import.js` — 145 assertions — plus `tests/lib/zipwrite.js`, a tiny zip writer for the fixtures; `tests/run.sh 9`).
+Handoff notes:
+
+- **New files:** `claude.js` (read-only access to Claude's config and extensions), `zip.js` (the bundle reader), `public/features/claudeimport.js` (the UI),
+  `tests/lib/zipwrite.js` (the test's zip writer). `server.js` grew the `/api/claude/*` routes, the tool switches and the log route; `mcp.js` keeps a
+  stderr ring buffer; `public/app.js` only skips switched-off tools in `buildTools()` and calls the new `hooks.onToolsRender`.
+- **The tool-switch format contract** (steps 10 and 12 reuse it — define it once, here):
+  `settings.toolToggles[providerId][toolName] === false` means *off*; a missing key means *on*.
+  `providerId` is the id of the MCP server (a UUID), `"builtin"` for the built-in web tools, and later `"skills"` (step 10) and `"workspace"` (step 12).
+  The browser gets every tool with an `enabled` flag and leaves the `enabled === false` ones out of the `tools` payload; the server refuses a call to a
+  switched-off tool (defence in depth — the model cannot call it either). `PUT /api/mcp/:id/tools` with `{disabled: [toolName, …]}` writes the switches;
+  removing a server removes its switches. The **page** keeps the switches of every server in a map (`toolOff`) and updates it before the request goes
+  out, and the requests of one server go one after the other — two clicks in a row therefore do not lose the first one.
+- **Secrets.** `view()` used to return the env values in plain text — fixed. The browser now only ever gets the env **keys** and a mask
+  (`••••` plus the last four characters; values of four characters or less are fully masked). A value can be replaced or removed with
+  `PUT /api/mcp/:id/env` (`{key, value}` or `{key, clear: true}`) — the old value is never read back, so it can never leak. The command, the arguments
+  and the URL of a server are scrubbed of the secret values too, so a secret pasted into an argument does not show up in the dialog either.
+  The **output** of a server is scrubbed as well: the `error` and the `stderr` of `view()` and every line of `GET /api/mcp/:id/logs` go through the
+  same `redact()`, so a server that writes its own command line to stderr cannot put a secret into the browser. A secret of less than four
+  characters is masked as well (as a whole word, so the text around it stays readable).
+- **Never automatic.** `POST /api/claude/import` and `POST /api/claude/extensions/install` refuse to do anything without `confirm: true` (400 otherwise),
+  and the dialog asks the same trust question as a server that is added by hand. A server that is already in Lumen is marked and refused (409).
+  The client sends `confirm: true` **only after** the user has seen the command and answered the question: for an extension the command comes from
+  `POST /api/claude/extensions/preview` (the command and the arguments with the secret values masked), for a server of Claude's config from the
+  review dialog (the command and the arguments, also scrubbed of the secret values).
+- **An imported server is a normal server.** The server of Claude's config goes through the same `cleanCfg` as one that is added by hand: a name of at
+  most 40 characters, a command of at most 1000 characters, at most 50 arguments of at most 1000 characters, at most 20 env values, and a `http(s)`
+  URL — a `file://` URL or a server without a command is refused with a 400.
+- **Bundles are hostile input.** `zip.js` refuses absolute paths, drive letters, `..` segments, symlink entries, encrypted entries, Zip64 and broken
+  directories, and it verifies that every file stays inside the extraction folder. The folder is emptied before it is written to, and the files are
+  written with mode 600. **The limits:** 2000 entries, 50 MB uncompressed in total, 20 MB per file, 20 MB for the uploaded file, 200:1 compression ratio.
+  **They are checked on the bytes that are really produced, not on the numbers the bundle claims:** the inflation is bounded
+  (`zlib.inflateRawSync(raw, { maxOutputLength })`), the size of every file is measured after the inflation, the running total is the sum of the
+  written bytes, and the sizes in the central directory are only a first filter. A bundle that lies about its size is therefore refused as well.
+  (The `maxOutputLength` of `zlib` has been there since Node v12.19.0/v14.5.0 — the **Node 22+** floor of `package.json` is a support
+  choice, not a technical need: 22 is the current LTS, 18 and 20 are end-of-life.)
+  **Every refusal names the limit that fired** — the limit per file, the limit in total, the limit of the upload, the number of files or the
+  compression ratio are five different messages. A bundle whose compressed stream is broken is reported as broken (the error of `zlib` is passed on),
+  not as a file that is too big. The name of an entry comes from the bundle, so it is stripped of control characters and shortened before it goes
+  into an error message.
+  Uploaded bundles are unpacked into `data/extensions/<uuid>`; an extension of Claude Desktop is imported **by reference** (its folder is never copied
+  into Lumen and never written to).
+- **Manifests** are v0.3 (`manifest_version: "0.3"`); anything else is refused. `user_config` supports the types `directory`, `file`, `string`, `number`
+  and `boolean` with `required`, `multiple` and `sensitive`; sensitive fields are password fields and **their default never enters the page** (an
+  empty field means "use the default"). The schema the **browser** gets comes from `claude.publicUserConfigSchema()` — the same schema as the
+  server's, but without the `default` of a sensitive field, so a manifest that declares a secret as a default never puts it into the browser. The
+  server keeps the default (`claude.userConfigSchema()`), so an empty field still means "use the default" when the extension is installed. A list
+  that is not a secret shows the default of the manifest in its textarea; a list of secrets stays empty.
+  The placeholders `${__dirname}`, `${HOME}` and `${user_config.key}` are substituted; an argument that is
+  exactly a `${user_config.key}` of a list becomes one argument per value. A `binary` extension runs the file itself — it is never its own first
+  argument.
+- **Logs and reload.** `mcp.js` keeps the last 200 stderr lines per server (`GET /api/mcp/:id/logs`), the Tools dialog has a viewer (≡) per server and
+  a "Reload all" button (`POST /api/mcp/reload`). The built-in web tools have no process, so they have no log and no button.
+- **The tests use fixtures, never the real files.** `LUMEN_CLAUDE_CONFIG` and `LUMEN_CLAUDE_EXTENSIONS` point the reader at a fixture folder;
+  `tests/run.sh` sets both. The test also asserts that Claude's config file is byte-for-byte unchanged after the import.
+- Not covered by the tests: a real `.mcpb` from the Claude app (the fixture is built by the test), an extension in another language than node, and the
+  Windows and Linux config paths (the path is chosen per OS in `claude.js`, but the test runs on macOS).
 
 ### Step 10: Skills
 - A skill is a folder with `SKILL.md` (YAML frontmatter `name`, `description`) plus optional files, stored in `data/skills/<name>/`. 30 MB limit.

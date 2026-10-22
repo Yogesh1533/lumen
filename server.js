@@ -5,6 +5,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { McpManager } = require('./mcp');
 const webtools = require('./webtools');
+const claude = require('./claude');
+const zip = require('./zip');
 const mcp = new McpManager();
 
 const PORT = process.env.PORT || 3100;
@@ -25,8 +27,12 @@ const PROJ_FILE = path.join(path.dirname(DATA_FILE), 'projects.json');
 let projects = {};
 try { projects = JSON.parse(fs.readFileSync(PROJ_FILE, 'utf8')); } catch { projects = {}; }
 const SETTINGS_FILE = path.join(path.dirname(DATA_FILE), 'settings.json');
-let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [], web: { enabled: false, provider: '', searxngUrl: '', braveKey: '' } };
+// Imported extensions are unpacked here: data/extensions/<id>.
+const EXT_DIR = path.join(path.dirname(DATA_FILE), 'extensions');
+let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [], toolToggles: {}, extensions: {}, web: { enabled: false, provider: '', searxngUrl: '', braveKey: '' } };
 try { const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); settings = { ...settings, ...saved, web: { ...settings.web, ...(saved.web || {}) } }; } catch { /* first run */ }
+if (!settings.toolToggles || typeof settings.toolToggles !== 'object') settings.toolToggles = {};
+if (!settings.extensions || typeof settings.extensions !== 'object') settings.extensions = {};
 const timers = new Map();
 // A small ring buffer of the server's own log lines, shown in Settings > Troubleshooting.
 const LOG_MAX = 300;
@@ -51,7 +57,104 @@ function write(file, obj) {
 const save = () => write(DATA_FILE, chats);
 const saveProjects = () => write(PROJ_FILE, projects);
 const saveSettings = () => write(SETTINGS_FILE, settings);
-const publicSettings = () => ({ ...settings, web: { ...settings.web, braveKey: '', hasBraveKey: !!settings.web.braveKey } });
+// ---- secrets ---------------------------------------------------------------
+// A secret (an MCP env value, a sensitive extension setting) never leaves the server:
+// the browser only ever gets the keys and a mask like "••••1234".
+const MASK = '••••';
+// A masked value keeps the last four characters, so the user can recognise it.
+const maskValue = (v) => { const s = String(v == null ? '' : v); return !s ? '' : (s.length > 4 ? MASK + s.slice(-4) : MASK); };
+// The extension a server was installed from (its manifest says which settings are secret).
+const extensionDef = (c) => (c && c.extension && settings.extensions[c.extension.id]) ? settings.extensions[c.extension.id] : null;
+// The plain values that must not show up in a command, an argument or a URL.
+function secretValues(c) {
+  const out = [];
+  for (const v of Object.values((c && c.env) || {})) if (v) out.push(String(v));
+  const def = extensionDef(c);
+  for (const [k, v] of Object.entries((c && c.userConfig) || {})) {
+    if (!v) continue;
+    const d = def && def.manifest && def.manifest.user_config && def.manifest.user_config[k];
+    if (d && d.sensitive) out.push(String(v));
+  }
+  return out; // every secret counts, a short one too
+}
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const redact = (text, secrets) => {
+  let out = String(text == null ? '' : text);
+  for (const s of secrets) {
+    if (!s) continue;
+    if (s.length >= 4) { out = out.split(s).join(maskValue(s)); continue; }
+    // A secret of less than four characters: only a whole word is replaced, so the
+    // text around it stays readable.
+    out = out.replace(new RegExp(`(^|[^A-Za-z0-9_])${escapeRegExp(s)}(?![A-Za-z0-9_])`, 'g'), `$1${maskValue(s)}`);
+  }
+  return out;
+};
+// What the browser may see of a server: no secret, only masked values.
+const viewCfg = (c) => {
+  const secrets = secretValues(c);
+  return {
+    id: c.id, name: c.name, transport: c.transport, enabled: !!c.enabled,
+    command: redact(c.command, secrets), args: (c.args || []).map((a) => redact(a, secrets)),
+    url: redact(c.url || '', secrets),
+    env: Object.fromEntries(Object.entries(c.env || {}).map(([k, v]) => [k, maskValue(v)])),
+    envKeys: Object.keys(c.env || {}),
+    extension: c.extension ? { id: c.extension.id, name: c.extension.name || '', source: c.extension.source || '' } : null,
+  };
+};
+// ---- tool toggles ----------------------------------------------------------
+// Format contract (steps 10 and 12 reuse it): toolToggles[provider][tool] === false means
+// the tool is switched off. A missing key means the tool is on. "provider" is the id of the
+// MCP server ("builtin" for the built-in web tools, later "skills" and "workspace").
+const disabledTools = (provider) => {
+  const t = settings.toolToggles[provider];
+  if (!t || typeof t !== 'object') return new Set();
+  return new Set(Object.entries(t).filter(([, v]) => v === false).map(([k]) => k));
+};
+const toolEnabled = (provider, tool) => !disabledTools(provider).has(tool);
+// What the browser gets for a server: the masked config plus the live status and tools.
+// The error and the output of the process are masked as well: a server that writes its
+// own command line to stderr must not put a secret into the browser.
+const view = (c) => {
+  const info = mcp.info(c.id), off = disabledTools(c.id), secrets = secretValues(c);
+  return { ...viewCfg(c), ...info,
+    error: info.error ? redact(info.error, secrets) : info.error,
+    stderr: redact(info.stderr, secrets),
+    tools: (info.tools || []).map((t) => ({ ...t, enabled: !off.has(t.name) })) };
+};
+// The status of a server goes into the log — but never its stderr: that output may
+// hold secrets and the log can be read by the browser.
+const logStatus = (cfg, info) => {
+  if (info.status === 'connected') console.log(`MCP ${cfg.name}: connected (${info.tools.length} tools)`);
+  else console.warn(`MCP ${cfg.name}: ${info.status} — details in Settings > Tools`);
+};
+// The limits of a server configuration. Every server — one that is added by hand and one
+// that comes from Claude Desktop — goes through this, so a name, a command, an argument or
+// an env value of an outside file can never be longer than it should be.
+const cleanCfg = (b, base = {}) => {
+  const cfg = { ...base };
+  if (b.name !== undefined) cfg.name = String(b.name).trim().slice(0, 40);
+  if (b.transport !== undefined) cfg.transport = b.transport === 'http' ? 'http' : 'stdio';
+  if (b.command !== undefined) cfg.command = String(b.command).trim().slice(0, 1000);
+  if (b.args !== undefined) cfg.args = (Array.isArray(b.args) ? b.args : []).map((a) => String(a).slice(0, 1000)).slice(0, 50);
+  if (b.url !== undefined) cfg.url = String(b.url).trim().slice(0, 500);
+  if (b.enabled !== undefined) cfg.enabled = !!b.enabled;
+  if (b.env !== undefined) {
+    const env = {};
+    for (const [k, v] of Object.entries(b.env || {}).slice(0, 20)) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) env[k] = String(v).slice(0, 2000);
+    cfg.env = env;
+  }
+  if (!cfg.name) throw new Error('Name is required');
+  if (cfg.transport === 'http') { if (!/^https?:\/\//i.test(cfg.url || '')) throw new Error('A http(s) URL is required'); }
+  else if (!cfg.command) throw new Error('A command is required');
+  return cfg;
+};
+// Two servers are the same when they run the same thing.
+const sameServer = (c, s) => (c.transport || 'stdio') === (s.transport || 'stdio')
+  && (c.command || '') === (s.command || '')
+  && JSON.stringify(c.args || []) === JSON.stringify(s.args || [])
+  && (c.url || '') === (s.url || '');
+
+const publicSettings = () => ({ ...settings, mcpServers: settings.mcpServers.map(viewCfg), extensions: undefined, web: { ...settings.web, braveKey: '', hasBraveKey: !!settings.web.braveKey } });
 // The built-in "Web" tools appear as a virtual MCP server when enabled.
 const builtinServer = () => settings.web.enabled
   ? { id: 'builtin', name: 'Web', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: webtools.tools(settings.web) }
@@ -243,32 +346,26 @@ async function api(req, res, url) {
 
   // ---- MCP servers ----------------------------------------------------------
   if (parts[0] === 'mcp') {
-    const view = (c) => ({ ...c, ...mcp.info(c.id) });
-    // The status of a server goes into the log — but never its stderr: that output may
-    // hold secrets and the log can be read by the browser.
-    const logStatus = (cfg, info) => {
-      if (info.status === 'connected') console.log(`MCP ${cfg.name}: connected (${info.tools.length} tools)`);
-      else console.warn(`MCP ${cfg.name}: ${info.status} — details in Settings > Tools`);
+    const builtinView = () => {
+      const b = builtinServer();
+      if (!b) return null;
+      const off = disabledTools(b.id);
+      return { ...b, tools: (b.tools || []).map((t) => ({ ...t, enabled: !off.has(t.name) })) };
     };
-    const cleanCfg = (b, base = {}) => {
-      const cfg = { ...base };
-      if (b.name !== undefined) cfg.name = String(b.name).trim().slice(0, 40);
-      if (b.transport !== undefined) cfg.transport = b.transport === 'http' ? 'http' : 'stdio';
-      if (b.command !== undefined) cfg.command = String(b.command).trim().slice(0, 1000);
-      if (b.url !== undefined) cfg.url = String(b.url).trim().slice(0, 500);
-      if (b.enabled !== undefined) cfg.enabled = !!b.enabled;
-      if (b.env !== undefined) {
-        const env = {};
-        for (const [k, v] of Object.entries(b.env || {}).slice(0, 20)) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) env[k] = String(v).slice(0, 2000);
-        cfg.env = env;
-      }
-      if (!cfg.name) throw new Error('Name is required');
-      if (cfg.transport === 'http') { if (!/^https?:\/\//i.test(cfg.url || '')) throw new Error('A http(s) URL is required'); }
-      else if (!cfg.command) throw new Error('A command is required');
-      return cfg;
+    // Switch tools of a provider on or off (the list of the ones that are off).
+    const setTools = (provider, body) => {
+      const list = Array.isArray(body.disabled) ? body.disabled.filter((x) => typeof x === 'string').slice(0, 200) : [];
+      const t = {};
+      for (const name of list) t[name] = false;
+      settings.toolToggles[provider] = t;
+      saveSettings();
     };
     const id = parts[1];
-    if (!id && m === 'GET') return send(res, 200, [builtinServer(), ...settings.mcpServers.map(view)].filter(Boolean));
+    if (!id && m === 'GET') {
+      const list = settings.mcpServers.map(view);
+      const b = builtinView();
+      return send(res, 200, b ? [b, ...list] : list);
+    }
     if (!id && m === 'POST') {
       if (settings.mcpServers.length >= 20) return send(res, 400, { error: 'Too many servers' });
       let cfg;
@@ -277,20 +374,61 @@ async function api(req, res, url) {
       if (cfg.enabled) logStatus(cfg, await mcp.connect(cfg));
       return send(res, 200, view(cfg));
     }
-    if (parts[0] === 'mcp' && id === 'call' && m === 'POST') {
+    if (id === 'call' && m === 'POST') {
       const b = await readBody(req);
       if (b.server === 'builtin') {
         const bs = builtinServer();
         if (!bs || !bs.tools.some((t) => t.name === b.tool)) return send(res, 200, { isError: true, text: 'That web tool is not available' });
+        if (!toolEnabled('builtin', String(b.tool))) return send(res, 200, { isError: true, text: 'That tool is switched off in Lumen' });
         return send(res, 200, await webtools.call(String(b.tool), b.arguments, settings.web));
       }
       if (!settings.mcpServers.some((c) => c.id === b.server && c.enabled)) return send(res, 404, { error: 'Unknown or disabled server' });
+      // A tool that is switched off never runs, not even when something asks for it directly.
+      if (!toolEnabled(b.server, String(b.tool))) return send(res, 200, { isError: true, text: 'That tool is switched off in Lumen' });
       try { return send(res, 200, await mcp.call(b.server, String(b.tool), b.arguments)); }
       catch (e) { return send(res, 200, { isError: true, text: 'Tool call failed: ' + String(e.message || e).slice(0, 500) }); }
     }
+    // "Reload all": every enabled server is started again.
+    if (id === 'reload' && m === 'POST') {
+      for (const cfg of settings.mcpServers) if (cfg.enabled) logStatus(cfg, await mcp.connect(cfg));
+      return send(res, 200, settings.mcpServers.map(view));
+    }
+    // The tool switches of the built-in (web) tools.
+    if (id === 'builtin' && parts[2] === 'tools' && m === 'PUT') {
+      setTools('builtin', await readBody(req));
+      return send(res, 200, builtinView() || { id: 'builtin' });
+    }
+    // The built-in web tools have no process, so they have no log.
+    if (id === 'builtin' && parts[2] === 'logs' && m === 'GET') return send(res, 200, { lines: [] });
     const idx = settings.mcpServers.findIndex((c) => c.id === id);
     if (idx < 0) return send(res, 404, { error: 'not found' });
     const cur = settings.mcpServers[idx];
+    // The stderr of a server, line by line (the log viewer). The lines are masked: the
+    // output of a process may hold a secret (it often writes its own command line).
+    if (parts[2] === 'logs' && m === 'GET') {
+      const secrets = secretValues(cur);
+      const lines = (mcp.logs(id).lines || []).map((l) => ({ t: l.t, text: redact(l.text, secrets) }));
+      return send(res, 200, { lines });
+    }
+    // Replace one env value. The browser never gets the old value back, so it can only
+    // send a new one.
+    if (parts[2] === 'env' && m === 'PUT') {
+      const b = await readBody(req);
+      const key = String(b.key || '');
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return send(res, 400, { error: 'That is not a valid environment variable name' });
+      const env = { ...(cur.env || {}) };
+      if (b.clear === true) delete env[key];
+      else env[key] = String(b.value == null ? '' : b.value).slice(0, 2000);
+      cur.env = env;
+      settings.mcpServers[idx] = cur; saveSettings();
+      if (cur.enabled) { await mcp.disconnect(cur.id); logStatus(cur, await mcp.connect(cur)); }
+      return send(res, 200, view(cur));
+    }
+    // Which tools of this server are switched off.
+    if (parts[2] === 'tools' && m === 'PUT') {
+      setTools(id, await readBody(req));
+      return send(res, 200, view(cur));
+    }
     if (parts[2] === 'reconnect' && m === 'POST') { logStatus(cur, await mcp.connect(cur)); return send(res, 200, view(cur)); }
     if (m === 'PUT') {
       let next;
@@ -301,8 +439,148 @@ async function api(req, res, url) {
     }
     if (m === 'DELETE') {
       await mcp.disconnect(id);
-      settings.mcpServers.splice(idx, 1); saveSettings();
+      settings.mcpServers.splice(idx, 1);
+      delete settings.toolToggles[id]; // the switches of a removed server go with it
+      saveSettings();
       return send(res, 200, { ok: true });
+    }
+  }
+
+  // ---- Claude Desktop (read-only) -------------------------------------------
+  // Nothing here writes to Claude's folders: the config is only read, and an extension
+  // that Claude has installed is used by reference.
+  if (parts[0] === 'claude') {
+    const sub = parts[1] || '';
+    // What Claude Desktop has. The env values are masked — they never leave the server.
+    // A value that also stands in an argument or in the URL is masked there as well.
+    if (sub === 'config' && m === 'GET') {
+      const found = claude.readConfig();
+      const servers = found.servers.map((s) => {
+        const secrets = Object.values(s.env || {}).filter(Boolean).map(String);
+        return {
+          key: s.key, name: s.name, transport: s.transport,
+          command: redact(s.command, secrets), args: (s.args || []).map((a) => redact(a, secrets)),
+          url: redact(s.url, secrets),
+          env: Object.fromEntries(Object.entries(s.env || {}).map(([k, v]) => [k, maskValue(v)])),
+          envKeys: Object.keys(s.env || {}),
+          duplicate: settings.mcpServers.some((c) => sameServer(c, s)),
+        };
+      });
+      return send(res, 200, { path: found.path, exists: found.exists, servers });
+    }
+    // Add ONE server. Never automatic: the body has to carry the confirmation of the user.
+    if (sub === 'import' && m === 'POST') {
+      const b = await readBody(req);
+      if (b.confirm !== true) return send(res, 400, { error: 'Importing a server needs an explicit confirmation' });
+      const found = claude.readConfig();
+      const s = found.servers.find((x) => x.key === b.key);
+      if (!s) return send(res, 404, { error: 'That server is not in the Claude config any more' });
+      if (settings.mcpServers.length >= 20) return send(res, 400, { error: 'Too many servers' });
+      if (settings.mcpServers.some((c) => sameServer(c, s))) return send(res, 409, { error: 'That server is already in Lumen' });
+      // The server of an outside file goes through the same limits as one that is added
+      // by hand: a name of at most 40 characters, at most 50 arguments, a http(s) URL.
+      let cfg;
+      try {
+        cfg = cleanCfg({ name: s.name, transport: s.transport, command: s.command, args: s.args, env: s.env, url: s.url || '' },
+          { id: crypto.randomUUID(), enabled: true, source: 'claude' });
+      } catch (e) { return send(res, 400, { error: 'This server cannot be imported: ' + String(e.message || e) }); }
+      settings.mcpServers.push(cfg); saveSettings();
+      if (cfg.enabled) logStatus(cfg, await mcp.connect(cfg));
+      return send(res, 200, view(cfg));
+    }
+    // The extensions Claude Desktop has installed (read-only, imported by reference).
+    if (parts[1] === 'extensions' && !parts[2] && m === 'GET') {
+      const list = claude.listExtensions();
+      return send(res, 200, {
+        dir: list.dir,
+        installed: list.installed.map((e) => ({
+          id: e.id, name: e.name, version: e.version, path: e.path,
+          userConfig: claude.publicUserConfigSchema(e.manifest),
+          installed: settings.mcpServers.some((c) => c.extension && c.extension.id === e.id),
+        })),
+      });
+    }
+    // Upload a .mcpb / .dxt bundle. It is unpacked into data/extensions/<id>.
+    if (parts[1] === 'extensions' && !parts[2] && m === 'POST') {
+      const b = await readBody(req);
+      let buf;
+      try { buf = Buffer.from(String(b.file || ''), 'base64'); } catch { buf = Buffer.alloc(0); }
+      if (!buf.length) return send(res, 400, { error: 'The bundle is empty' });
+      const id = crypto.randomUUID(), dir = path.join(EXT_DIR, id);
+      try { zip.extract(buf, dir); }
+      catch (e) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* nothing to clean */ } return send(res, 400, { error: 'The bundle was refused: ' + String(e.message || e) }); }
+      const manifest = claude.readManifest(dir);
+      if (!manifest) {
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* nothing to clean */ }
+        return send(res, 400, { error: 'The bundle has no manifest.json of version 0.3' });
+      }
+      const rec = { id, name: String(manifest.name || id).slice(0, 80), version: String(manifest.version || ''), dir, source: 'upload', manifest };
+      settings.extensions[id] = rec; saveSettings();
+      return send(res, 200, { id, name: rec.name, version: rec.version, dir, userConfig: claude.publicUserConfigSchema(manifest), installed: false });
+    }
+    // The command of an extension, before it runs. The user has to see it and to agree
+    // with it — the answer holds the command with the secret values masked.
+    if (parts[1] === 'extensions' && parts[2] === 'preview' && m === 'POST') {
+      const b = await readBody(req);
+      let rec = null;
+      if (b.source === 'claude') {
+        const e = claude.listExtensions().installed.find((x) => x.id === b.id);
+        if (!e) return send(res, 404, { error: 'That extension is not installed in Claude Desktop' });
+        rec = { id: e.id, name: e.name, version: e.version, dir: e.path, source: 'claude', manifest: e.manifest };
+      } else {
+        rec = settings.extensions[b.id] || null;
+        if (!rec) return send(res, 404, { error: 'Unknown extension' });
+      }
+      const schema = claude.userConfigSchema(rec.manifest);
+      let values;
+      try { values = claude.cleanUserConfig(schema, b.userConfig || {}); }
+      catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+      const cmd = claude.buildCommand(rec.manifest, values, rec.dir);
+      if (!cmd.command) return send(res, 400, { error: 'The extension has no command to run' });
+      // The values of the sensitive fields and the env values stay hidden: only their
+      // place in the command is shown.
+      const secrets = [];
+      for (const [k, v] of Object.entries(values)) {
+        const d = schema[k];
+        if (d && d.sensitive && v) for (const x of (Array.isArray(v) ? v : [v])) secrets.push(String(x));
+      }
+      for (const v of Object.values(cmd.env || {})) if (v) secrets.push(String(v));
+      return send(res, 200, {
+        name: rec.name || rec.id,
+        command: redact(cmd.command, secrets),
+        args: (cmd.args || []).map((a) => redact(a, secrets)),
+        env: Object.fromEntries(Object.entries(cmd.env || {}).map(([k, v]) => [k, maskValue(v)])),
+      });
+    }
+    // Install an extension: the user filled in the form, Lumen starts the server.
+    if (parts[1] === 'extensions' && parts[2] === 'install' && m === 'POST') {
+      const b = await readBody(req);
+      if (b.confirm !== true) return send(res, 400, { error: 'Installing an extension needs an explicit confirmation' });
+      let rec = null;
+      if (b.source === 'claude') {
+        const e = claude.listExtensions().installed.find((x) => x.id === b.id);
+        if (!e) return send(res, 404, { error: 'That extension is not installed in Claude Desktop' });
+        // By reference: the files stay where Claude put them.
+        rec = { id: e.id, name: e.name, version: e.version, dir: e.path, source: 'claude', manifest: e.manifest };
+      } else {
+        rec = settings.extensions[b.id] || null;
+        if (!rec) return send(res, 404, { error: 'Unknown extension' });
+      }
+      if (settings.mcpServers.length >= 20) return send(res, 400, { error: 'Too many servers' });
+      if (settings.mcpServers.some((c) => c.extension && c.extension.id === rec.id)) return send(res, 409, { error: 'That extension is already in Lumen' });
+      const schema = claude.userConfigSchema(rec.manifest);
+      let values;
+      try { values = claude.cleanUserConfig(schema, b.userConfig || {}); }
+      catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+      const cmd = claude.buildCommand(rec.manifest, values, rec.dir);
+      if (!cmd.command) return send(res, 400, { error: 'The extension has no command to run' });
+      const cfg = { id: crypto.randomUUID(), name: rec.name || rec.id, transport: 'stdio', enabled: true,
+        command: cmd.command, args: cmd.args, env: cmd.env,
+        extension: { id: rec.id, name: rec.name, source: rec.source }, userConfig: values };
+      settings.extensions[rec.id] = rec;
+      settings.mcpServers.push(cfg); saveSettings();
+      logStatus(cfg, await mcp.connect(cfg));
+      return send(res, 200, view(cfg));
     }
   }
 
