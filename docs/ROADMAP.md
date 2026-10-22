@@ -17,7 +17,12 @@ Step 9 (import from Claude Desktop) is built, tested and committed on branch `st
 a review dialog for Claude's MCP servers, extension bundles (`.mcpb`/`.dxt`), a switch per tool,
 a per-server log viewer and "Reload all".
 
-**Next: steps 10 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 10 (skills) is built, tested and committed on branch `step-10-skills` (not merged yet):
+a skill is a folder with a `SKILL.md`; a Skills dialog (list, switch on and off, write and edit,
+upload a zip or loose files, delete), two starter skills, the skills tools `use_skill` and
+`read_skill_file`, and the enabled skills in the system prompt.
+
+**Next: steps 11 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -29,12 +34,15 @@ a per-server log viewer and "Reload all".
 | `public/app.js` | The whole single-page UI (vanilla JS, no build step) |
 | `public/features/quickwins.js` | Step-8 UI (usage, read aloud, find, export, tabs, compare, troubleshooting); a classic script loaded after `app.js`, sharing its global scope |
 | `public/features/claudeimport.js` | Step-9 UI (import dialog, extension form, tool switches, log viewer); a classic script loaded after `app.js` |
+| `skills.js` | The skills of the user: the folders in `data/skills/<name>/`, the two read-only tools of the model |
+| `public/features/skills.js` | Step-10 UI (Skills dialog, the editor of a `SKILL.md`, the uploads, the approval switches); a classic script loaded after `app.js` |
+| `starter-skills/` | The two skills that ship with Lumen (`summarise`, `explain`); copied into `data/skills/` on the first run, never overwritten |
 | `claude.js` | Claude Desktop's config and extensions — **read-only** (never writes in Claude's folders) |
 | `zip.js` | Dependency-free reader for `.mcpb`/`.dxt` bundles, with the limits and the path checks |
 | `public/index.html`, `style.css` | Markup and styles |
 | `bin/lumen-app.js` | Opens Lumen in a Chrome/Edge app window |
 | `tests/` | Browser tests driven over CDP (see section 6) |
-| `data/` | Runtime data (git-ignored): `chats.json`, `projects.json`, `settings.json` |
+| `data/` | Runtime data (git-ignored): `chats.json`, `projects.json`, `settings.json`, `skills/<name>/` (the skills of the user) |
 
 Run: `npm start` (port 3100) or `npm run app`. Node 22+. Ollama at `http://127.0.0.1:11434` (`OLLAMA_BASE_URL`).
 
@@ -240,8 +248,54 @@ Handoff notes:
 - A skill is a folder with `SKILL.md` (YAML frontmatter `name`, `description`) plus optional files, stored in `data/skills/<name>/`. 30 MB limit.
 - UI: Skills dialog (list, enable/disable, create/edit `SKILL.md`, upload zip or files, delete) with two starter skills.
 - Model integration: enabled skills' names and one-line descriptions go into the system prompt; built-in tools `use_skill(name)` (returns the SKILL.md body and file list) and
-  `read_skill_file(name, path)`. `use_skill` auto-approved by default (read-only, local) but configurable.
+  `read_skill_file(name, path)`. ~~`use_skill` auto-approved by default (read-only, local) but configurable.~~ **Corrected: approval is required by default** (see the handoff notes below).
 - Tests: listing in prompt; real model calls `use_skill`; traversal blocked in `read_skill_file`; zip upload; size limit; disable hides it.
+
+**Done** on branch `step-10-skills` (tests: `tests/step10-skills.js` — 112 assertions; `tests/run.sh 10`).
+Handoff notes:
+
+- **New files:** `skills.js` (the folders, the validation, the two tools of the model), `public/features/skills.js` (the UI),
+  `starter-skills/summarise/` (`SKILL.md` + `checklist.md`) and `starter-skills/explain/` (`SKILL.md` + `examples.md`),
+  `tests/step10-skills.js`. `server.js` grew the `/api/skills*` routes; `public/app.js` grew `loadSkills()` and `skillsPrompt()`.
+- **`builtinServer()` became `builtinServers()`** (an array), as the plan asked: the web server keeps the id `builtin`, the skills server gets the id `skills`
+  (`builtin: true`, `transport: 'builtin'`, `status: 'connected'`, and it is listed in `GET /api/mcp` next to the web server, so its tools can be switched off like any other).
+  `POST /api/mcp/call` dispatches `server: 'skills'` to the skills implementation, exactly like `server: 'builtin'` goes to `webtools.call` — through the same
+  `toolEnabled(provider, name)` check, so a switched-off skills tool never runs. `PUT /api/mcp/skills/tools` writes the switches with the step-9 format contract
+  (`settings.toolToggles['skills'][tool] === false` means off; the provider id is the server id).
+- **The approval ruling (the plan's section 5 and the security invariants disagreed).** The invariants win: **a skills tool asks for approval like every other tool.**
+  The Skills dialog has a switch per skills tool — "ask before a skill is used" — and it is **on** by default. Turning it **off** writes "always allow" for that exact
+  tool into the **existing** client store (`toolAllow()` / `saveAllow()` in `public/app.js`, the same localStorage store the "Always allow" button writes to). That is the
+  invariant's own exception and nothing more: no server-side auto-approval, no new bypass, no change to the approval flow. `read_skill_file` is **not** exempt — it is the
+  tool that touches a path inside a skill folder, so it must be able to refuse a traversal.
+- **The 30 MB limit holds however the skill arrives.** `zip.js` now takes a limits override (`readZip(buf, limits)` / `extract(buf, destDir, limits)`, merged over the
+  defaults) — **the defaults did not change** (the step-9 tests pin them). A skill bundle uses 30 MB per file, 30 MB in total and 30 MB per upload; the same limit is
+  enforced on the folder as a whole after the extraction, on a hand-written `SKILL.md` and on a loose file. The limits are measured on the bytes that are really
+  produced, not on the sizes the bundle claims. The ratio limit of the general bundle reader (200:1) is **2000:1 for skill bundles**: there the 30 MB byte limits are the
+  ceiling, and 200:1 would refuse a legitimate file of zeroes (a deflate stream cannot expand more than about 1000:1 anyway).
+- **A bundle is unpacked into a folder of its own first** (`data/.skills-upload-<uuid>`), so a bundle that is refused leaves nothing behind and the skill of the user is
+  only replaced when the bundle is good. A bundle whose `SKILL.md` sits in a folder of its own is accepted (the folder is unwrapped).
+- **The name is a folder name**, so it must match `^[a-z0-9][a-z0-9_-]{0,39}$` — no slashes, no dots, no `..`, no spaces, at most 40 characters. A path inside a skill may
+  not be absolute, may not hold `..`, and **a symlink is never read** — not the file itself and not a folder on the way to it (`read_skill_file` refuses a symlink and
+  checks the real path against the real path of the folder).
+- **The tools are read-only.** `use_skill` returns the body of the `SKILL.md` and the list of the files; `read_skill_file` returns one text file (at most 1 MB, then it is
+  cut off). Neither writes, deletes nor runs anything. A skill that is switched off is refused by both and is not in the system prompt.
+- **The system prompt** lists only the enabled skills, with their names and their one-line description, and the block says that the text of a skill is material the user
+  installed on this computer — not an instruction of Lumen.
+- **The starter skills** are copied into `data/skills/` on the first run and are **never overwritten** (the user may have edited them).
+- **The built-in Skills server changes what the earlier steps' tests see.** It is always in the list of the servers (`GET /api/mcp`), so the list is never
+  empty any more and the header badge counts 2 tools more. Three assertions of the earlier steps were therefore changed (the same run on the base commit
+  `f8c05f7` is green without them): `tests/step5-styles-memory.js` — "Normal adds nothing" now asks that the *style* adds no text (the skills block is in the
+  prompt); `tests/step6-mcp-tools.js` — the test server is looked up by its name and not by its place in the list, and the badge is 3 + 2 = 5;
+  `tests/step7-desktop-polish.js` — the web server is looked up by its id (`builtin`), because the Skills server is built in as well.
+- **A model with a skill in its prompt asks to use it — and a test has to answer.** `tests/step4-thinking-branches.js` asks "Explain step by step why the sky
+  appears blue."; with the starter skill `explain` in the system prompt the model asks for that skill instead of answering, and the turn waits for the approval
+  card. The test now answers the card ("Allow once") and waits for the turn to be over (`finishTurn()`), exactly like a user would. The assertions about the
+  thinking block did not change: the message that carries the thinking is the one with the tool call, and its block is closed and timed as before.
+- **Traps in the tests** (worth knowing for the later steps): the CDP harness answers with a truthy `"EXC …"` string when the page throws, so a boolean check has to be
+  compared with `=== true` (the step-10 test has a `t()` helper for that); `fetch` refuses a body on `GET` (the test helper must not send one); and a test must not crash
+  when the route does not exist yet — it has to report a failure and keep going.
+- Not covered by the tests: a zip with the `SKILL.md` in a folder of its own (it works, the test does not cover it), a file of more than 1 MB in one go (it is cut off),
+  and a skill whose name is `upload` (the name is reserved for the upload route).
 
 ### Step 11: Side Chat and Split View
 - **Side Chat:** right panel with its own thread seeded with a snapshot of the main conversation ("answer briefly; this is a side question"); never modifies the main chat;

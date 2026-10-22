@@ -104,11 +104,13 @@ const FAKE_SPEECH = `
 
   // ---- web tools ----------------------------------------------------------------------------
   const probe = async (tool, args) => ev(`api('/mcp/call', { method: 'POST', body: { server: 'builtin', tool: ${JSON.stringify(tool)}, arguments: ${JSON.stringify(args)} } }).then(r => JSON.stringify(r))`);
-  ok('web tools are off by default (no built-in server)', (await ev(`api('/mcp').then(l => l.some(s => s.builtin))`)) === false);
+  // The built-in "Skills" server (step 10) is always there, so the web server is looked
+  // up by its own id.
+  ok('web tools are off by default (no built-in server)', (await ev(`api('/mcp').then(l => l.some(s => s.id === 'builtin'))`)) === false);
   await ev(`document.querySelector('#toolsBtn').click(); 1`); await sleep(600);
   ok('web config hidden until enabled', (await ev(`document.querySelector('#webCfg').hidden`)) === true);
   await ev(`document.querySelector('#webOn').click(); 1`); await sleep(900);
-  ok('enabling adds a built-in "Web" server with fetch_page only', (await ev(`JSON.stringify(state.mcp.filter(s => s.builtin).map(s => s.tools.map(t => t.name)))`)) === '[["fetch_page"]]');
+  ok('enabling adds a built-in "Web" server with fetch_page only', (await ev(`JSON.stringify(state.mcp.find(s => s.id === 'builtin').tools.map(t => t.name))`)) === '["fetch_page"]');
   ok('built-in row has no remove/toggle buttons', (await ev(`document.querySelector('#mcpList .mcp [data-a=rm]')`)) === null);
   await ev(`(() => { webProv.value = 'searxng'; webProv.dispatchEvent(new Event('change')); webUrl.value = 'http://127.0.0.1:3197'; document.querySelector('#webSave').click(); })(); 1`); await sleep(900);
   ok('configuring SearXNG adds web_search', (await ev(`JSON.stringify(state.mcp.find(s => s.builtin).tools.map(t => t.name))`)) === '["web_search","fetch_page"]');

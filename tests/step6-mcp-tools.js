@@ -17,10 +17,14 @@ const procs = () => { try { return Number(execSync('pgrep -f mcp-test-server.js 
   ok('tools dialog opens', await waitFor(`document.querySelector('#toolsDlg').open`));
   ok('trust warning is shown before adding', /only add servers you trust/i.test(await ev(`document.querySelector('#toolsDlg .warn').textContent`)));
   await ev(`(() => { mcName.value = 'Test'; mcCmd.value = ${JSON.stringify('node ' + SRV)}; document.querySelector('#mcAdd').click(); })(); 1`);
-  ok('server connects', await waitFor(`state.mcp.length === 1 && state.mcp[0].status === 'connected'`, 30000), await ev(`JSON.stringify(state.mcp.map(m => [m.name, m.status, m.error]))`));
-  ok('3 tools discovered', (await ev(`state.mcp[0].tools.length`)) === 3);
-  ok('server row rendered with green status', (await ev(`document.querySelector('#mcpList .dot.connected') !== null`)));
-  ok('header badge shows tool count', (await ev(`document.querySelector('#toolsBtn').dataset.n`)) === '3' && (await ev(`document.querySelector('#toolsBtn').classList.contains('on')`)));
+  // The list also holds the built-in "Skills" server (step 10), so the test server is
+  // looked up by its name and not by its place in the list.
+  const testRow = `#mcpList .mcp[data-id="' + state.mcp.find(m => m.name === 'Test').id + '"]`;
+  ok('server connects', await waitFor(`!!state.mcp.find(m => m.name === 'Test' && m.status === 'connected')`, 30000), await ev(`JSON.stringify(state.mcp.map(m => [m.name, m.status, m.error]))`));
+  ok('3 tools discovered', (await ev(`state.mcp.find(m => m.name === 'Test').tools.length`)) === 3);
+  ok('server row rendered with green status', (await ev(`document.querySelector('${testRow} .dot.connected') !== null`)));
+  // 3 tools of the test server + 2 built-in skills tools.
+  ok('header badge shows tool count', (await ev(`document.querySelector('#toolsBtn').dataset.n`)) === '5' && (await ev(`document.querySelector('#toolsBtn').classList.contains('on')`)));
   ok('server process is running', procs() === 1, 'procs=' + procs());
   await shot('step6-dialog');
   await ev(`document.querySelector('#toolsClose').click(); 1`);
@@ -114,13 +118,13 @@ const procs = () => { try { return Number(execSync('pgrep -f mcp-test-server.js 
   await ev(`document.querySelector('#toolsOn').click(); 1`);
 
   // ---- disable / remove --------------------------------------------------------------
-  await ev(`document.querySelector('#mcpList [data-a=en]').click(); 1`);
-  ok('disabling the server stops its process', await waitFor(`state.mcp[0].enabled === false`, 10000) && (await sleep(600), procs() === 0), 'procs=' + procs());
-  ok('disabled server contributes no tools', (await ev(`buildTools()`)) === null);
-  await ev(`document.querySelector('#mcpList [data-a=en]').click(); 1`);
-  ok('re-enabling reconnects', await waitFor(`state.mcp[0].status === 'connected'`, 20000));
-  await ev(`document.querySelector('#mcpList [data-a=rm]').click(); 1`);
-  ok('removing the server deletes it and kills the process', await waitFor(`state.mcp.length === 0`, 10000) && (await sleep(600), procs() === 0));
+  await ev(`document.querySelector('${testRow} [data-a=en]').click(); 1`);
+  ok('disabling the server stops its process', await waitFor(`state.mcp.find(m => m.name === 'Test').enabled === false`, 10000) && (await sleep(600), procs() === 0), 'procs=' + procs());
+  ok('disabled server contributes no tools', (await ev(`JSON.stringify(buildTools())`)).indexOf('test__') === -1);
+  await ev(`document.querySelector('${testRow} [data-a=en]').click(); 1`);
+  ok('re-enabling reconnects', await waitFor(`state.mcp.find(m => m.name === 'Test').status === 'connected'`, 20000));
+  await ev(`document.querySelector('${testRow} [data-a=rm]').click(); 1`);
+  ok('removing the server deletes it and kills the process', await waitFor(`state.mcp.filter(m => !m.builtin).length === 0`, 10000) && (await sleep(600), procs() === 0));
   await ev(`document.querySelector('#toolsClose').click(); 1`);
   h.close();
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

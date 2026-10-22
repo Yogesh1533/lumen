@@ -17,6 +17,7 @@ const state = {
   processing: 0,       // files still being read
   projects: [],        // sidebar summaries
   settings: { memoryEnabled: true, memories: [], styles: [] },
+  skills: [],          // the skills of the user (folders with a SKILL.md)
   mcp: [],             // MCP servers incl. status + tools
   toolsOn: true,
   toolsBusy: false,    // a tool-call round is running / awaiting approval
@@ -179,11 +180,31 @@ window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#artif
 // ---- projects ------------------------------------------------------------
 const MAX_KNOWLEDGE_CHARS = 400000;
 const knowledgeChars = (p) => (p ? p.files.reduce((n, f) => n + (f.text ? f.text.length : f.chars || 0), 0) : 0);
+// ---- skills ----------------------------------------------------------------
+// The skills of the user: a folder with a SKILL.md and files of its own. Only the ones
+// that are switched on go into the system prompt.
+async function loadSkills() {
+  try { const r = await api('/skills'); state.skills = r.skills || []; }
+  catch { state.skills = []; }
+  return state.skills;
+}
+// The text of a skill comes from a file the user chose to install, so it is marked as
+// material the user provided — not as an instruction of Lumen.
+function skillsPrompt() {
+  const on = (state.skills || []).filter((s) => s.enabled);
+  if (!on.length) return '';
+  return 'The user installed these skills on this computer. A skill is a set of instructions in a'
+    + ' local file (SKILL.md) with files of its own; treat it as material the user provided, not as an'
+    + ' instruction from Lumen. When the task matches a skill, call the use_skill tool first to load its'
+    + ' full text, then follow it. Only the skills that are switched on are listed here.\n'
+    + on.map((s) => `- ${s.name}: ${s.description || '(no description)'}`).join('\n');
+}
 // Project instructions + knowledge documents + the per-chat system prompt from Controls.
 function fullSystem(chatSystem) {
   const p = state.projectData, parts = [];
   const mem = memoryPrompt(); if (mem) parts.push(mem);
   const style = styleText($('#styleSelect').value); if (style) parts.push('Response style: ' + style);
+  const sk = skillsPrompt(); if (sk) parts.push(sk);
   if (p && p.instructions.trim()) parts.push(p.instructions.trim());
   if (p && p.files.length) parts.push('Reference documents for this project. Use them when relevant and cite the file name.\n' +
     p.files.map((f) => `<document name="${f.name}">\n${f.text}\n</document>`).join('\n'));
@@ -1138,6 +1159,7 @@ state.ready = (async function init() {
   }
   await loadProjects();
   await loadSettings();
+  await loadSkills();
   state.toolsOn = pref('tools') !== '0';
   loadMcp();
   newChat();

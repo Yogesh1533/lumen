@@ -345,6 +345,17 @@ mark.find-hit.cur { background: #ff9d2e; }
 .tog { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
 .tog .tn { font-weight: 500; }
 .tog .td { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* skills */
+#skillList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+#skillList:empty::after { content: "No skills yet. Create one or upload a zip."; font-size: 12px; color: var(--muted); }
+.skill { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+.skill .toggle { flex: none; }
+.skill .skmain { flex: 1; min-width: 0; }
+.skill .nm { font-weight: 600; }
+.skill .meta { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#skillTools { display: flex; flex-direction: column; gap: 4px; }
+#skContent { font-family: ui-monospace, Menlo, monospace; font-size: 12px; min-height: 220px; }
+#skFiles { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
 #mcpLogsDlg { max-width: min(720px, calc(100vw - 32px)); }
 #envDlg { max-width: min(640px, calc(100vw - 32px)); }
 .envrow { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 4px 0; }
