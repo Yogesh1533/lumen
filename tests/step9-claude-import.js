@@ -21,6 +21,10 @@ const EXT_DIR = path.join(DATA_DIR, 'extensions');
 const CLAUDE_SECRET = 'sk-CLAUDE-SECRET-1234';   // in the fixture config of Claude Desktop
 const EXT_SECRET = 'FIXTURE-TOKEN-abc123';       // a sensitive setting of the fixture extension
 const SHORT_SECRET = 'Q7z';                      // a secret of three characters
+const CLAUDE_EXT_SECRET = 'claude-ext-secret-default'; // the default of a secret field of the extension of Claude
+const CLAUDE_EXT_LABEL = 'claude-ext-label';     // the default of a field that is not a secret
+const FORM_SECRET = 's3cret-list-value';         // the default of a secret list of the form fixture
+const FORM_LABEL = 'form-fixture-label';         // the default of a field that is not a secret
 const HOME = os.homedir();
 const MCP_TEST_SERVER = path.join(REPO, 'tests', 'mcp-test-server.js');
 
@@ -85,12 +89,18 @@ function writeFixtures() {
     },
   }, null, 2));
   // An extension that Claude Desktop has installed (read-only, imported by reference).
+  // Its manifest declares a secret with a default and a field that is not a secret with
+  // a default: the default of the secret may never come to the browser.
   const dir = path.join(CLAUDE_EXT, 'claude-fixture-extension');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({
     manifest_version: '0.3', name: 'Claude Fixture Extension', version: '2.0.0',
-    server: { type: 'node', entry_point: 'server.js', mcp_config: { command: 'node', args: ['${__dirname}/server.js'] } },
-    user_config: { dir: { type: 'directory', title: 'Directory', required: true, multiple: true } },
+    server: { type: 'node', entry_point: 'server.js', mcp_config: { command: 'node', args: ['${__dirname}/server.js', '--token', '${user_config.token}'] } },
+    user_config: {
+      dir: { type: 'directory', title: 'Directory', required: true, multiple: true },
+      label: { type: 'string', title: 'Label', default: CLAUDE_EXT_LABEL },
+      token: { type: 'string', title: 'Token', sensitive: true, default: CLAUDE_EXT_SECRET },
+    },
   }));
   fs.writeFileSync(path.join(dir, 'server.js'), tinyServerSource());
   return dir;
@@ -121,7 +131,8 @@ const FORM_MANIFEST = {
   },
   user_config: {
     paths: { type: 'string', title: 'Paths', multiple: true, default: ['/tmp/one', '/tmp/two'] },
-    codes: { type: 'string', title: 'Codes', multiple: true, sensitive: true, default: ['s3cret-list-value'] },
+    label: { type: 'string', title: 'Label', default: FORM_LABEL },
+    codes: { type: 'string', title: 'Codes', multiple: true, sensitive: true, default: [FORM_SECRET] },
   },
 };
 const FORM_BUNDLE_FILE = path.join(TMP, 'form-extension.mcpb');
@@ -295,6 +306,13 @@ function softData(bytes) {
   ok('the bundle is unpacked into the extensions folder of Lumen', fs.existsSync(path.join(EXT_DIR, up.json.id, 'manifest.json')), up.json.dir);
   ok('the secret of the bundle is not in the answer', !up.text.includes(EXT_SECRET));
 
+  // The schema that the browser gets: the default of a secret is not in it. The default
+  // of a field that is not a secret is — the form shows it.
+  const up2 = await call('POST', '/api/claude/extensions', { file: fixtureBundle(FORM_MANIFEST).toString('base64'), filename: 'form-fixture.mcpb' });
+  ok('a bundle with a secret default is unpacked', up2.status === 200, up2.text.slice(0, 200));
+  ok('the default of a secret never comes to the browser', !up2.text.includes(FORM_SECRET), up2.text.slice(0, 200));
+  ok('the default of a field that is not a secret comes to the browser', up2.text.includes(FORM_LABEL), up2.text.slice(0, 200));
+
   const install = await call('POST', '/api/claude/extensions/install', {
     id: up.json.id, source: 'upload', confirm: true,
     userConfig: { dir: ['/tmp/lumen-one', '/tmp/lumen-two'], tag: 'from-test', token: EXT_SECRET },
@@ -445,12 +463,29 @@ function softData(bytes) {
   ok('the extensions of Claude Desktop are listed', (exts.json.installed || []).some((e) => e.id === 'claude-fixture-extension'), exts.text.slice(0, 200));
   const claudeExt = (exts.json.installed || []).find((e) => e.id === 'claude-fixture-extension');
   ok('the files of Claude are not copied', claudeExt && claudeExt.path === CLAUDE_EXT_DIR, claudeExt && claudeExt.path);
+  // The schema the browser gets holds no default of a secret — the manifest of the
+  // extension of Claude declares one.
+  ok('the default of a secret of a manifest never comes to the browser', !exts.text.includes(CLAUDE_EXT_SECRET), exts.text.slice(0, 200));
+  ok('the default of a field that is not a secret comes to the browser', exts.text.includes(CLAUDE_EXT_LABEL), exts.text.slice(0, 200));
+  // The command that would run: the secret of the manifest is masked there as well.
+  const prev = await call('POST', '/api/claude/extensions/preview', {
+    id: 'claude-fixture-extension', source: 'claude', userConfig: { dir: ['/tmp/lumen-claude'] },
+  });
+  ok('the preview of an extension does not show the default of a secret', prev.status === 200 && !prev.text.includes(CLAUDE_EXT_SECRET), prev.text.slice(0, 200));
   const claudeTreeBefore = tree(CLAUDE_EXT_DIR);
   const refInstall = await call('POST', '/api/claude/extensions/install', {
     id: 'claude-fixture-extension', source: 'claude', confirm: true, userConfig: { dir: ['/tmp/lumen-claude'] },
   });
   ok('an extension of Claude is imported by reference', refInstall.status === 200 && refInstall.json.args[0] === path.join(CLAUDE_EXT_DIR, 'server.js'), JSON.stringify(refInstall.json.args || refInstall.text.slice(0, 200)));
   ok('nothing was written into the folder of Claude', tree(CLAUDE_EXT_DIR) === claudeTreeBefore, tree(CLAUDE_EXT_DIR));
+  ok('the answer of the install does not show the default of a secret', !refInstall.text.includes(CLAUDE_EXT_SECRET), refInstall.text.slice(0, 200));
+  // The secret field was left empty, so the server fell back to the default of the
+  // manifest: the command it builds holds the value — the browser only sees a mask.
+  const claudeOnDisk = await settingsOnDisk((s) => (s.mcpServers || []).some((x) => (x.extension || {}).id === 'claude-fixture-extension'));
+  const claudeSrv = (claudeOnDisk.mcpServers || []).find((x) => (x.extension || {}).id === 'claude-fixture-extension');
+  ok('an empty secret field falls back to the default of the manifest', (claudeSrv.args || []).includes(CLAUDE_EXT_SECRET), JSON.stringify(claudeSrv.args));
+  ok('the list of the servers does not show the default of a secret', !(await call('GET', '/api/mcp')).text.includes(CLAUDE_EXT_SECRET), 'the default of a secret leaked');
+  ok('the settings of the browser do not show the default of a secret', !(await call('GET', '/api/settings')).text.includes(CLAUDE_EXT_SECRET), 'the default of a secret leaked');
 
   // ---- 10. the logs and the reload -------------------------------------------
   const logs = await call('GET', `/api/mcp/${importedId}/logs`);

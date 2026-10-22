@@ -76,6 +76,15 @@ function userConfigSchema(manifest) {
   return out;
 }
 
+// The schema the browser gets: the same as the server's, but without the default of a
+// sensitive field. A secret never goes to the browser — not even as the default of a
+// manifest. The server keeps the default, so an empty field still means "use the default".
+function publicUserConfigSchema(manifest) {
+  const out = userConfigSchema(manifest);
+  for (const def of Object.values(out)) if (def.sensitive) delete def.default;
+  return out;
+}
+
 // The extensions Claude Desktop has installed. They are read, never copied or edited.
 function listExtensions() {
   const dir = extensionsDir();
@@ -161,4 +170,4 @@ function cleanUserConfig(schema, values) {
   return out;
 }
 
-module.exports = { claudeDir, configPath, extensionsDir, readConfig, readManifest, userConfigSchema, listExtensions, buildCommand, cleanUserConfig, expandVars };
+module.exports = { claudeDir, configPath, extensionsDir, readConfig, readManifest, userConfigSchema, publicUserConfigSchema, listExtensions, buildCommand, cleanUserConfig, expandVars };

@@ -495,7 +495,7 @@ async function api(req, res, url) {
         dir: list.dir,
         installed: list.installed.map((e) => ({
           id: e.id, name: e.name, version: e.version, path: e.path,
-          userConfig: claude.userConfigSchema(e.manifest),
+          userConfig: claude.publicUserConfigSchema(e.manifest),
           installed: settings.mcpServers.some((c) => c.extension && c.extension.id === e.id),
         })),
       });
@@ -516,7 +516,7 @@ async function api(req, res, url) {
       }
       const rec = { id, name: String(manifest.name || id).slice(0, 80), version: String(manifest.version || ''), dir, source: 'upload', manifest };
       settings.extensions[id] = rec; saveSettings();
-      return send(res, 200, { id, name: rec.name, version: rec.version, dir, userConfig: claude.userConfigSchema(manifest), installed: false });
+      return send(res, 200, { id, name: rec.name, version: rec.version, dir, userConfig: claude.publicUserConfigSchema(manifest), installed: false });
     }
     // The command of an extension, before it runs. The user has to see it and to agree
     // with it — the answer holds the command with the secret values masked.

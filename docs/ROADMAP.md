@@ -222,7 +222,10 @@ Handoff notes:
   into Lumen and never written to).
 - **Manifests** are v0.3 (`manifest_version: "0.3"`); anything else is refused. `user_config` supports the types `directory`, `file`, `string`, `number`
   and `boolean` with `required`, `multiple` and `sensitive`; sensitive fields are password fields and **their default never enters the page** (an
-  empty field means "use the default"). A list that is not a secret shows the default of the manifest in its textarea; a list of secrets stays empty.
+  empty field means "use the default"). The schema the **browser** gets comes from `claude.publicUserConfigSchema()` — the same schema as the
+  server's, but without the `default` of a sensitive field, so a manifest that declares a secret as a default never puts it into the browser. The
+  server keeps the default (`claude.userConfigSchema()`), so an empty field still means "use the default" when the extension is installed. A list
+  that is not a secret shows the default of the manifest in its textarea; a list of secrets stays empty.
   The placeholders `${__dirname}`, `${HOME}` and `${user_config.key}` are substituted; an argument that is
   exactly a `${user_config.key}` of a list becomes one argument per value. A `binary` extension runs the file itself — it is never its own first
   argument.
@@ -232,10 +235,6 @@ Handoff notes:
   `tests/run.sh` sets both. The test also asserts that Claude's config file is byte-for-byte unchanged after the import.
 - Not covered by the tests: a real `.mcpb` from the Claude app (the fixture is built by the test), an extension in another language than node, and the
   Windows and Linux config paths (the path is chosen per OS in `claude.js`, but the test runs on macOS).
-- **Known gap (found in the fix round 2, not fixed there):** the answer of `POST /api/claude/extensions` carries the `default` of a **sensitive** field of
-  the manifest. The form does not show it (an empty field means "use the default"), but the value is in the JSON of the answer, so a manifest that
-  declares a secret as a default puts that secret into the browser. The fix belongs in the route that answers the browser — leave the `default` of a
-  sensitive field out of that answer. The server keeps it: the install reads the manifest itself, so an empty field still means "use the default".
 
 ### Step 10: Skills
 - A skill is a folder with `SKILL.md` (YAML frontmatter `name`, `description`) plus optional files, stored in `data/skills/<name>/`. 30 MB limit.
