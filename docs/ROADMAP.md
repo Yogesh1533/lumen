@@ -386,7 +386,7 @@ Handoff notes:
   and cross-pane refresh over `BroadcastChannel`. This avoids refactoring the global state in `app.js`. Side Chat can reuse the same embed mechanism.
 - Tests: two panes stream independently; side chat leaves main messages unchanged; insert works; embed mode layout; sidebar refresh across panes.
 
-**Done** on branch `step-11-side-split` (tests: `tests/step11-side-split.js` — 55 assertions; `tests/run.sh 11`).
+**Done** on branch `step-11-side-split` (tests: `tests/step11-side-split.js` — 82 assertions; `tests/run.sh 11`).
 Handoff notes:
 
 - **New file:** `public/features/splitview.js` (the whole feature: the embed mode, the channel, the side chat, the split view).
@@ -398,30 +398,57 @@ Handoff notes:
   tools, it approves tool calls. The artifact preview is a different element (`#artFrame`) and keeps its own sandbox
   (`sandbox="allow-scripts allow-forms"`, an opaque origin) — the step-2 tests still pass unweakened.
 - **The embed mode is a mode of the same page**, not a second app: `?embed=1` puts the class `embed` on `<body>` (no sidebar, a compact
-  header) and `?chat=ID` opens that chat. There is no `app-embed.js` and no second copy of the app.
-- **A pane keeps the chat of its own address.** The `openChat` of the app is wrapped in the embed mode: it opens the chat of the query
-  string and nothing else, so the "continue the last chat" switch and the restored chat tabs of the app cannot drag the pane to another
-  conversation. The user can still point the pane at any chat with the picker in the compact header (that one call is allowed), and the
-  command palette hides the chats of the user in a pane.
+  header) and `?chat=ID` opens that chat. There is no `app-embed.js` and no second copy of the app. The mode is known to `app.js`
+  itself (`const isEmbed`), so the feature scripts and the app agree on it — one source of truth.
+- **A pane keeps the chat of its own address.** The pane opens the chat of the query string and nothing else, so the "continue the last
+  chat" switch and the restored chat tabs of the app cannot drag the pane to another conversation. The user can still point the pane at
+  another chat with the picker in the compact header, and the command palette hides the chats of the user in a pane.
 - **A chat that does not exist does not break a pane:** `?chat=ID` with an unknown id falls back to a new chat and the normal empty state.
 - **The side chat is a chat record of its own** (`POST /api/chats` with the seed as its first message) and it never writes to the main chat.
   The only way into the main chat is the "Insert into chat" button: it adds a **message of the user** with the marker
   `[Side chat] <title>` and lets the normal `persist()` save it — no new route, no direct write into the store.
 - **The snapshot is bounded and says so.** The seed holds the last 20 messages of the main chat (oldest first) and at most 20,000 characters
   in all; the cap is written into the seed itself ("at most 20 messages and 20,000 characters go into the snapshot … 12 of 20 messages and
-  18,675 of 20,000 characters are shown here"), between `--- begin snapshot ---` and `--- end snapshot ---`.
-- **One BroadcastChannel for the whole app** (`lumen`). A pane posts `list` when the list of chats changed (created, renamed, deleted,
-  pinned, moved) and `messages` when the messages of a chat changed. The fingerprint of the list is order-independent, so a pane that
-  refreshes because of another pane does not post about that refresh — the panes cannot spin (the test watches the counter of the
-  received messages). A browser without `BroadcastChannel` has no cross-pane refresh and no error. A lone pane behaves exactly as before.
-- **The second pane of the split view gets a conversation of its own** (`/?embed=1`), not the chat of the main window: the app saves the
-  whole list of messages of a chat every time, so two panes that write the same chat would take each other's messages away. The mechanism
-  of the plan (`?embed=1&chat=ID`) is there and is what the side chat uses; a chat of the user can be opened in the split pane with the
-  picker of the pane.
-- **The panes share the localStorage of the app** (the model, the chat tabs): the embed pane is the same origin, so the tabs of the pane
-  can overwrite the tabs of the main window. Not fixed — the fix would be a namespaced `pref()`, and `pref` is a `const` in `app.js`.
-- The side chat is named "Side chat — <title of the main chat>" and is marked as named (`titled`), so the model does not give it a title of its own.
+  18,675 of 20,000 characters are shown here"), between `--- begin snapshot ---` and `--- end snapshot ---`. The head of the seed and the two
+  markers are measured before the body is cut, so the seed can never be longer than the cap.
+- **One BroadcastChannel for the whole app** (`lumen`). A window posts `{type:'sync', chat, list}` when the messages of a chat changed and/or
+  the list of the chats changed. The fingerprint of the list is order-independent, so a window that refreshes because of another window
+  does not post about that refresh — the panes cannot spin (the test watches the counter of the received messages and the counter of the
+  posts). A browser without `BroadcastChannel` has no cross-pane refresh and no error. A lone pane behaves exactly as before.
+- **The side chat is named "Side chat — <title of the main chat>"** and is marked as named (`titled`), so the model does not give it a title of its own.
 - The temporary-chat rule is inherited by the panes (they are the same app): the memory is never used and nothing is saved in a temporary chat.
+
+Fix round 1 (same branch, second and third commit):
+- **The second pane of the split view is `/?embed=1&chat=ID` with a real chat id** (the plan's own mechanism, honoured literally). When the
+  split view opens, the main window picks the **most recent** chat of the user that no other window has open and puts its id in the `src`
+  (the list of the server puts the pinned chats first, so the order of the list is not the order of the chats — the stamp decides); the picker
+  of the pane can point it at another chat. Two panes on one chat cannot work: `PUT /api/chats/:id` replaces the whole list of the messages, so
+  two panes that write the same chat take each other's messages away.
+- **Two windows are never on the same chat.** Every window has an id (`main`, or `pane-<random>`) and announces the chat it has open over the
+  channel (`{type:'pane', id, chat}`) when it starts and whenever its chat changes. A window that hears an id it does not know answers once
+  with its own announcement (the answer is not answered again — no loop). A **pane** that learns that another window has the chat it has
+  open moves away (it opens a new empty chat and stops writing to that chat); the **main window never moves away** — the user clicking a
+  chat in the sidebar must not be undone. A pane **refuses** to open a chat that another window has open (its picker does not offer it, and
+  the open path refuses it even when the id is forced), and its picker leaves out the chats of **all** the other windows, not only the
+  main one's. A chat that the main window makes by writing in it (such a chat gets its id only when it is saved) is announced too.
+- **A pane that refreshes because of another window does not post about that refresh — the post is dropped, not queued.** The signature of
+  the list is still updated, so the next real change compares against a fresh baseline. A local change that lands inside such a window loses
+  its list post; the next event re-syncs the list.
+- **The feature does not replace a function of `app.js` any more.** `app.js` grew four additive hooks — `onChatsRender` (after the list of
+  the chats is rendered), `onPersist` (after a chat was saved), `beforeOpenChat` (`(id) => false` refuses to open that chat) and `onPalette`
+  (the items of the command palette) — and `splitview.js` uses only those. The four hooks are `if (hooks.x)` with a `null` default, so
+  nothing else in the app changes; the hooks that were there before (`onOpenChat`, `onNewChat`) are chained, never replaced.
+- **The panes share the localStorage of the app** (the model, the chat tabs), so the tab strip of a pane could make the next reload of the
+  main window come back on the chat of the pane. In the embed mode the tab strip is now neither saved nor restored nor shown (`isEmbed` in
+  `app.js`; the tab strip is hidden by the rules of the embed mode in `style.css`).
+- **The server stamps the chats with a monotonic clock** (`stamp.js`, the third commit of this round): the stamps are strictly increasing,
+  so two chats made in the same millisecond never tie and "continue last chat" always opens the chat that was updated last. The clock is
+  exported and the test drives it directly (1000 calls in a tight loop must give 1000 strictly increasing values).
+- The tests of the step were widened: the panes that do not spin is now a real change in one window (a new chat) with the two halves the
+  old test was missing (the other window receives **exactly one** message and does **not** post back), the sidebar of the pane is checked
+  for the title of the new chat, the model of the pane is checked against the model the test asked for, the embed mode is checked with
+  `getComputedStyle` instead of a comparison of the header's HTML, a reload of the main window after a side chat was opened does not land
+  on the side chat, and the seed of the side chat is checked against the numbers it says about itself.
 
 ### Step 12: workspace agent (Cowork/Code-lite)
 Highest risk step. There is **no VM sandbox**, so keep it conservative.

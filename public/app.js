@@ -1,5 +1,14 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
+// The second pane of Lumen (features/splitview.js) is this app in an embed mode: no
+// sidebar, a compact header. One source of truth for the mode — the feature scripts
+// read `isEmbed` from here instead of working it out a second time.
+const isEmbed = new URLSearchParams(location.search).get('embed') === '1';
+if (isEmbed) {
+  document.body.classList.add('embed');
+  const embedHead = document.querySelector('header');
+  if (embedHead) embedHead.classList.add('compact');
+}
 const SUGGESTIONS = [
   'Explain how a transformer neural network works, simply',
   'Write a Python script that renames files by date taken',
@@ -34,6 +43,10 @@ const hooks = {
   onReply: null,       // (reply) after an assistant reply finishes
   onRender: null,      // () after the messages are re-rendered
   onToolsRender: null, // () after the list of MCP servers is re-rendered
+  onChatsRender: null, // () after the list of chats has been rendered
+  onPersist: null,     // (chatId) after a chat was saved
+  beforeOpenChat: null,// (id) => false to refuse to open that chat
+  onPalette: null,     // (items, chats) => items (the command palette)
 };
 
 // ---- utilities -----------------------------------------------------------
@@ -612,7 +625,7 @@ function buildPalette(chats) {
   if (state.project) act('Leave project', 'project', () => selectProject(null));
   for (const p of state.projects) act('Project: ' + p.name, 'project', () => selectProject(p.id));
   for (const c of chats) act('Chat: ' + c.title, 'chat', () => openChat(c.id));
-  return items;
+  return hooks.onPalette ? (hooks.onPalette(items, chats) || items) : items;
 }
 function paletteFilter(items, q) {
   const toks = q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -904,6 +917,7 @@ async function refreshChats() {
   const qs = q ? '?q=' + encodeURIComponent(q) : '?project=' + (state.project || 'none');
   state.chats = await api('/chats' + qs);
   renderSidebar();
+  if (hooks.onChatsRender) hooks.onChatsRender();
 }
 
 // ---- chat lifecycle ------------------------------------------------------
@@ -923,6 +937,7 @@ function newChat() {
   renderAll(); renderSidebar(); $('#input').focus();
 }
 async function openChat(id) {
+  if (hooks.beforeOpenChat && hooks.beforeOpenChat(id) === false) return;
   if (state.streaming) state.streaming.abort();
   if (state.toolsBusy) cancelTools();
   closeArtifact();
@@ -947,6 +962,7 @@ async function persist() {
     await api('/chats/' + c.id, { method: 'PUT', body: { messages: c.messages, model: c.model, system: c.system, style: c.style } });
   }
   refreshChats();
+  if (hooks.onPersist) hooks.onPersist(state.chat.id);
 }
 
 function setBusy(b) {
