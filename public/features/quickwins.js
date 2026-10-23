@@ -385,13 +385,18 @@ $('#diagCopy').onclick = async () => {
 // ---- chat tabs -------------------------------------------------------------------
 // A tab is a chat that is open in the strip above the conversation. The strip is
 // remembered across reloads; the "New Chat" tab is not (it has no id yet).
+// A pane of the split view is the same app in an embed mode: it has no tab strip,
+// and it must not write the tabs of the app either — the panes share one
+// localStorage, and a pane that saved its chat would make the next reload of the
+// main window come back on the chat of the pane.
 const chatTabs = { list: [], active: null, closed: [] };
 const tabKey = (id) => id || 'new';
 // Snapshot the saved tabs before app.js boots (a new chat would otherwise overwrite them).
 const savedTabs = (() => {
+  if (isEmbed) return null;   // a pane never restores the tabs of the app
   try { const s = JSON.parse(pref('tabs') || 'null'); return s && Array.isArray(s.list) ? s : null; } catch { return null; }
 })();
-function saveTabs() { pref('tabs', JSON.stringify({ list: chatTabs.list.filter((t) => t.id), active: chatTabs.active })); }
+function saveTabs() { if (isEmbed) return; pref('tabs', JSON.stringify({ list: chatTabs.list.filter((t) => t.id), active: chatTabs.active })); }
 function renderTabs() {
   const box = $('#tabStrip'), list = $('#tabList');
   if (!box) return;
@@ -407,6 +412,7 @@ function renderTabs() {
 }
 function openTab(chat) {
   if (!chat) return;
+  if (isEmbed) return;   // a pane has no tab strip
   const key = tabKey(chat.id);
   if (chat.id) chatTabs.list = chatTabs.list.filter((t) => t.key !== 'new'); // the unsaved chat is gone
   let tab = chatTabs.list.find((t) => t.key === key);
@@ -470,7 +476,7 @@ $('#contLast').checked = pref('contLast') === '1';
 $('#contLast').onchange = (e) => pref('contLast', e.target.checked ? '1' : '0');
 // On start: restore the tabs, then either continue the last chat or the active tab.
 state.ready.then(async () => {
-  if (savedTabs) {
+  if (savedTabs && !isEmbed) {
     chatTabs.list = savedTabs.list.filter((t) => t && typeof t.key === 'string');
     chatTabs.active = savedTabs.active || (chatTabs.list[0] && chatTabs.list[0].key) || null;
     renderTabs();

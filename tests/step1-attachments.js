@@ -12,7 +12,10 @@ const FX = path.join(__dirname, 'fixtures');
   ok('3 attachment chips appear', await waitFor(`state.pending.length === 3`, 15000), await ev(`[...document.querySelectorAll('#chips .chip')].map(c => c.innerText.replace(/\\n/g, ' | ')).join(' || ')`));
   ok('image is stored as an image, files as text', (await ev(`state.pending.map(a => a.kind).join()`)) === 'image,text,text');
   ok('PDF text was extracted', /BLUEFISH-7/.test(await ev(`state.pending[2].text`)));
-  const model = await ev(`state.models.find(m => m.caps.includes('vision')) && state.models.find(m => m.caps.includes('vision')).id`);
+  // The pinned model (LUMEN_TEST_MODEL) comes first when it has vision: the pin keeps
+  // the prompts of the run off the cloud models.
+  const pin = JSON.stringify(process.env.LUMEN_TEST_MODEL || '');
+  const model = await ev(`(() => { const v = state.models.filter(m => m.caps.includes('vision')); const p = v.find(m => m.id === ${pin}); return (p || v[0] || {}).id; })()`);
   ok('a vision-capable model exists', !!model, model);
   await ev(`document.querySelector('#modelSelect').value = ${JSON.stringify(model)}; 1`);
 

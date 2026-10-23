@@ -363,9 +363,23 @@ mark.find-hit.cur { background: #ff9d2e; }
 .envrow .meta { color: var(--muted); font-family: ui-monospace, Menlo, monospace; flex: none; }
 .envrow input { flex: 1; }
 
+/* step 11: the side chat and the split view (the second pane of Lumen) */
+#sidePane, #splitPane { width: 38%; min-width: 340px; flex: none; padding: 0; gap: 0; border-right: 0; border-left: 1px solid var(--border); background: var(--bg); }
+#sidePane[hidden], #splitPane[hidden] { display: none; }
+.pane-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.pane-head strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+#sideFrame, #splitFrame { flex: 1; width: 100%; border: 0; background: var(--bg); }
+/* the embed mode: no sidebar, a compact header — it is the same app, only the layout is smaller */
+body.embed #sidebar { display: none; }
+body.embed #openSide { display: none !important; }
+body.embed #tabStrip, body.embed .embed-hide { display: none; }
+body.embed header.compact { padding: 4px 10px; gap: 6px; }
+body.embed header.compact select, body.embed header.compact button { font-size: 12px; padding: 4px 8px; }
+@media (max-width: 900px) { #sidePane, #splitPane { position: fixed; z-index: 6; inset: 0 0 0 auto; width: 100%; min-width: 0; } }
+
 /* print: the conversation only — the browser can save it as a PDF */
 @media print {
-  #sidebar, #controls, #artifact, header, .findbar, #composer, #welcome, #toast, dialog, .msg .tools, .msg .vers { display: none !important; }
+  #sidebar, #controls, #artifact, #sidePane, #splitPane, header, .findbar, #composer, #welcome, #toast, dialog, .msg .tools, .msg .vers { display: none !important; }
   html, body, #app, main { height: auto; overflow: visible; background: #fff; color: #000; }
   #messages { overflow: visible; padding: 0; }
   .msg { max-width: none; break-inside: avoid; }

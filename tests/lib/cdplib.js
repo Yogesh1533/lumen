@@ -165,6 +165,13 @@ async function launch(url, port, { extraArgs = [], width = 1400, height = 800, p
   // Pin the model for the whole run (e.g. LUMEN_TEST_MODEL=gemma4:latest keeps test prompts off cloud models).
   // Without it the tests use the first model Lumen lists, which may be a cloud model.
   if (process.env.LUMEN_TEST_MODEL) {
+    // The first page of a fresh server waits for the capabilities of every model
+    // (Ollama is asked once per model), so the list can still be empty here.
+    const want = JSON.stringify(process.env.LUMEN_TEST_MODEL);
+    for (let i = 0; i < 80; i++) {
+      if ((await ev(`[...document.querySelectorAll('#modelSelect option')].some((o) => o.value === ${want})`)) === true) break;
+      await sleep(250);
+    }
     await ev(`(() => { const s = document.querySelector('#modelSelect'); s.value = ${JSON.stringify(process.env.LUMEN_TEST_MODEL)}; s.dispatchEvent(new Event('change')); })(); 1`);
     if ((await ev(`document.querySelector('#modelSelect').value`)) !== process.env.LUMEN_TEST_MODEL) throw new Error('LUMEN_TEST_MODEL is not installed: ' + process.env.LUMEN_TEST_MODEL);
   }

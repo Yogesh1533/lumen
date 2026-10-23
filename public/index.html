@@ -45,6 +45,8 @@
       <button id="findBtn" class="ghost" title="Find in conversation">🔍</button>
       <button id="exportChatBtn" class="ghost" title="Export this chat">⤓</button>
       <button id="compareBtn" class="ghost" title="Compare two models">⚖</button>
+      <button id="sideChatBtn" class="ghost embed-hide" title="Ask a side question in a panel of its own">💬 Side chat</button>
+      <button id="splitBtn" class="ghost embed-hide" title="Open a second pane of Lumen">▣ Split</button>
       <button id="controlsBtn" class="ghost">Controls</button>
     </header>
 
@@ -122,6 +124,28 @@
     </label>
     <label class="check"><input type="checkbox" id="autoRead"> Read replies aloud</label>
     <label class="check"><input type="checkbox" id="contLast"> Continue last chat when Lumen starts</label>
+  </aside>
+
+  <!-- The second pane of Lumen (step 11). It is Lumen itself: the same origin, the same
+       app, a separate JS state. It has NO sandbox attribute on purpose — it is a full
+       user of the app (it sends messages, uses tools, approves tool calls).
+       This is NOT the artifact preview above: that one keeps its opaque origin
+       (sandbox="allow-scripts allow-forms", never the same origin) and is not touched here. -->
+  <aside id="sidePane" hidden>
+    <div class="pane-head">
+      <strong id="sideTitle">Side chat</strong>
+      <button id="sideInsert" class="ghost" title="Put the answer of the side chat into the main chat">Insert into chat</button>
+      <button id="sideClose" class="icon" title="Close the side chat">✕</button>
+    </div>
+    <iframe id="sideFrame" title="Side chat"></iframe>
+  </aside>
+
+  <aside id="splitPane" hidden>
+    <div class="pane-head">
+      <strong id="splitTitle">Split view</strong>
+      <button id="splitClose" class="icon" title="Close the split view">✕</button>
+    </div>
+    <iframe id="splitFrame" title="Split view"></iframe>
   </aside>
 </div>
 <dialog id="projDlg">
@@ -374,5 +398,6 @@
 <script src="/features/quickwins.js"></script>
 <script src="/features/claudeimport.js"></script>
 <script src="/features/skills.js"></script>
+<script src="/features/splitview.js"></script>
 </body>
 </html>
