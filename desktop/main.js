@@ -22,8 +22,6 @@ const MAX_OPEN_BYTES = 20 * 1024 * 1024;
 app.setName('Lumen');
 // A profile of its own for the tests (and the single-instance lock is per profile).
 if (process.env.LUMEN_DESKTOP_PROFILE) app.setPath('userData', process.env.LUMEN_DESKTOP_PROFILE);
-// A packaged app cannot write next to its code: its data goes into the profile.
-if (app.isPackaged && !process.env.LUMEN_DATA) process.env.LUMEN_DATA = path.join(app.getPath('userData'), 'data', 'chats.json');
 
 // ---- one instance --------------------------------------------------------------
 // A second start hands its arguments (a deep link, files to open) to the first one and
@@ -38,6 +36,11 @@ const testLog = { notifications: [], external: [], secondInstances: 0, loginItem
 const PREFS_FILE = path.join(app.getPath('userData'), 'desktop.json');
 let prefs = { background: false, openAtLogin: false };
 try { prefs = { ...prefs, ...JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')) }; } catch { /* first run */ }
+// The data folder: "dataDir" in desktop.json (for example the data folder of a
+// checkout, so the app and `npm start` share the chats). Otherwise a packaged app keeps
+// its data in its profile — it cannot write next to its code.
+if (!process.env.LUMEN_DATA && typeof prefs.dataDir === 'string' && path.isAbsolute(prefs.dataDir)) process.env.LUMEN_DATA = path.join(prefs.dataDir, 'chats.json');
+if (app.isPackaged && !process.env.LUMEN_DATA) process.env.LUMEN_DATA = path.join(app.getPath('userData'), 'data', 'chats.json');
 function savePrefs() {
   try { fs.mkdirSync(path.dirname(PREFS_FILE), { recursive: true }); fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2)); } catch { /* read-only */ }
 }
