@@ -47,6 +47,11 @@ const hooks = {
   onPersist: null,     // (chatId) after a chat was saved
   beforeOpenChat: null,// (id) => false to refuse to open that chat
   onPalette: null,     // (items, chats) => items (the command palette)
+  toolServer: null,    // (srv) => false to keep the tools of that server from the model
+  toolPolicy: null,    // async (call, chat) => null | {auto} | {ask, noAlways, preview, body} | {error}
+  onAwait: null,       // (call, chat, waiting) a tool call starts or stops waiting for approval
+  onCancelTools: null, // () the user stopped the tool calls
+  onToolResult: null,  // (call, chat) after a tool call has run
 };
 
 // ---- utilities -----------------------------------------------------------
@@ -438,6 +443,7 @@ function updateToolsBtn() {
 function buildTools() {
   const map = new Map(), defs = [], used = new Set();
   for (const srv of connectedServers()) {
+    if (hooks.toolServer && hooks.toolServer(srv) === false) continue;
     let prefix = slug(srv.name); while (used.has(prefix)) prefix += '_';
     used.add(prefix);
     for (const t of srv.tools) {
@@ -464,13 +470,15 @@ function toolsHTML(m) {
   return m.toolCalls.map((c) => `<div class="toolcall ${c.status}" data-call="${c.id}">
     <div class="th"><span>🔧</span><b>${esc(c.serverName)} › ${esc(c.tool)}</b><span class="ts">${TOOL_STATUS[c.status] || c.status}</span></div>
     <details><summary>Arguments</summary><pre>${esc(JSON.stringify(c.arguments, null, 2))}</pre></details>
-    ${c.status === 'awaiting' ? '<div class="appr"><button type="button" class="primary" data-tc="once">Allow once</button><button type="button" data-tc="always">Always allow</button><button type="button" class="deny" data-tc="deny">Deny</button></div>' : ''}
+    ${c.preview ? `<pre class="preview ${esc(c.previewKind || '')}">${esc(c.preview)}</pre>` : ''}
+    ${c.status === 'awaiting' ? `<div class="appr"><button type="button" class="primary" data-tc="once">Allow once</button>${c.noAlways ? '' : '<button type="button" data-tc="always">Always allow</button>'}<button type="button" class="deny" data-tc="deny">Deny</button></div>` : ''}
     ${c.result ? `<details><summary>Result</summary><pre>${esc(c.result)}</pre></details>` : ''}
   </div>`).join('');
 }
 function cancelTools() {
   state.stopTools = true;
   for (const res of approvals.values()) res('deny');
+  if (hooks.onCancelTools) hooks.onCancelTools();
 }
 // Runs the model's tool calls one by one, asking permission first. Returns true to let the model continue.
 async function runToolCalls(c, reply) {
@@ -484,19 +492,31 @@ async function runToolCalls(c, reply) {
       if (call.status === 'error') { repaint(); continue; }
       if (state.stopTools) { call.status = 'denied'; call.result = 'Cancelled by the user.'; repaint(); continue; }
       const key = `${call.server}/${call.tool}`;
-      if (!toolAllow().has(key)) {
+      // A feature may decide how a call is approved (the workspace: reads run, writes
+      // and commands show what they do and are asked every time).
+      let pol = null;
+      if (hooks.toolPolicy) {
+        try { pol = await hooks.toolPolicy(call, c); } catch (e) { pol = { error: String(e.message || e) }; }
+      }
+      if (pol && pol.error) { call.status = 'error'; call.result = pol.error; repaint(); continue; }
+      if (pol && pol.preview) { call.preview = pol.preview; call.previewKind = pol.previewKind || ''; }
+      if (pol && pol.noAlways) call.noAlways = true;
+      if (pol && pol.ask || (!pol || !pol.auto) && !toolAllow().has(key)) {
         call.status = 'awaiting'; repaint(); $('#status').textContent = 'Waiting for your approval…';
+        if (hooks.onAwait) hooks.onAwait(call, c, true);
         const choice = await new Promise((res) => approvals.set(call.id, res));
         approvals.delete(call.id);
-        if (choice === 'always') { const a = toolAllow(); a.add(key); saveAllow(a); }
+        if (hooks.onAwait) hooks.onAwait(call, c, false);
+        if (choice === 'always' && !call.noAlways) { const a = toolAllow(); a.add(key); saveAllow(a); }
         if (choice === 'deny') { call.status = 'denied'; call.result = state.stopTools ? 'Cancelled by the user.' : 'The user denied permission to run this tool.'; repaint(); continue; }
       }
       call.status = 'running'; repaint(); $('#status').textContent = `Running ${call.tool}…`;
       try {
-        const r = await api('/mcp/call', { method: 'POST', body: { server: call.server, tool: call.tool, arguments: call.arguments } });
+        const r = await api('/mcp/call', { method: 'POST', body: { server: call.server, tool: call.tool, arguments: call.arguments, ...((pol && pol.body) || {}) } });
         call.status = r.isError ? 'error' : 'done'; call.result = r.text;
       } catch (e) { call.status = 'error'; call.result = 'Tool call failed: ' + (e.message || e); }
       repaint();
+      if (hooks.onToolResult) hooks.onToolResult(call, c);
     }
   } finally { state.toolsBusy = false; setBusy(false); }
   return !state.stopTools && state.chat === c;

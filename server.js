@@ -8,6 +8,7 @@ const webtools = require('./webtools');
 const claude = require('./claude');
 const zip = require('./zip');
 const skills = require('./skills');
+const ws = require('./workspace');
 const { nowStamp } = require('./stamp');
 const mcp = new McpManager();
 // The clock of the server is exported, so that it can be tested directly. The test
@@ -42,6 +43,11 @@ try { const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); settings
 if (!settings.toolToggles || typeof settings.toolToggles !== 'object') settings.toolToggles = {};
 if (!settings.extensions || typeof settings.extensions !== 'object') settings.extensions = {};
 if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
+// The workspace: the trusted folders, the folder and the mode of each chat, the folder
+// of each project and the scheduled tasks.
+settings.workspace = { folders: [], chats: {}, projects: {}, schedules: [], ...(settings.workspace || {}) };
+for (const k of ['chats', 'projects']) if (!settings.workspace[k] || typeof settings.workspace[k] !== 'object') settings.workspace[k] = {};
+for (const k of ['folders', 'schedules']) if (!Array.isArray(settings.workspace[k])) settings.workspace[k] = [];
 // The leftovers of an upload that a crash left behind are swept away first: the backup
 // of a skill that was replaced is put back, and the starter skills are only installed
 // where there is no skill of the user.
@@ -178,8 +184,150 @@ const builtinServers = () => {
   const out = [];
   if (settings.web.enabled) out.push({ id: 'builtin', name: 'Web', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: webtools.tools(settings.web) });
   if (skills.anyEnabled(SKILLS_DIR, settings)) out.push({ id: 'skills', name: 'Skills', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: skills.tools() });
+  if (settings.workspace.folders.length) out.push({ id: 'workspace', name: 'Workspace', builtin: true, transport: 'builtin', enabled: true, status: 'connected', error: null, tools: ws.tools() });
   return out;
 };
+// ---- the workspace -----------------------------------------------------------
+// The folder and the mode of a session (a chat id, or the id of a temporary chat that
+// is never saved). A session without a folder of its own gets the folder of its
+// project in the "ask" mode. A folder that is no longer trusted gives no access.
+const wsTemp = new Map();   // the sessions of temporary chats live only in memory
+const WS_MODES = new Set(['ask', 'auto-edit']);
+function wsConfig(session) {
+  const W = settings.workspace;
+  let c = W.chats[session] || wsTemp.get(session) || null;
+  if (!c || !c.folder) {
+    const chat = chats[session];
+    const pf = chat && chat.project && W.projects[chat.project];
+    c = pf ? { folder: pf, mode: (c && c.mode) || 'ask', fromProject: true } : (c ? { ...c, folder: null } : null);
+  }
+  if (!c || !c.folder || !W.folders.includes(c.folder)) return c ? { folder: null, mode: WS_MODES.has(c.mode) ? c.mode : 'ask' } : null;
+  return { folder: c.folder, mode: WS_MODES.has(c.mode) ? c.mode : 'ask', fromProject: !!c.fromProject };
+}
+const workspace = new ws.Workspace({ dataDir: path.dirname(DATA_FILE), getConfig: wsConfig });
+for (const sig of ['exit']) process.on(sig, () => workspace.killAll());
+
+// ---- scheduled tasks ---------------------------------------------------------
+// A prompt that runs while the server is up, every N minutes or every day at a time.
+// It runs without anybody watching, so it may only use the tools the user chose for it
+// when it was made (out of the tools the user had set to "Always allow"), and never a
+// tool that changes files or runs a command. The answer lands in a new chat.
+function nextRunOf(t, from = Date.now()) {
+  if (t.kind === 'daily') {
+    const [hh, mm] = String(t.at || '09:00').split(':').map(Number);
+    const d = new Date(from); d.setSeconds(0, 0); d.setHours(hh, mm);
+    if (d.getTime() <= from) d.setDate(d.getDate() + 1);
+    return d.getTime();
+  }
+  return from + Math.max(1, Number(t.every) || 60) * 60000;
+}
+function cleanSchedule(b) {
+  const t = {};
+  t.name = String(b.name || '').trim().slice(0, 60);
+  if (!t.name) throw new Error('A task needs a name');
+  t.prompt = String(b.prompt || '').trim().slice(0, 4000);
+  if (!t.prompt) throw new Error('A task needs a prompt');
+  t.model = String(b.model || '').trim().slice(0, 200);
+  if (!t.model) throw new Error('A task needs a model');
+  t.kind = b.kind === 'daily' ? 'daily' : 'interval';
+  if (t.kind === 'daily') {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.at || ''))) throw new Error('The time must be HH:MM');
+    t.at = String(b.at);
+  } else {
+    t.every = Math.round(Number(b.every));
+    if (!(t.every >= 1 && t.every <= 7 * 24 * 60)) throw new Error('The interval must be 1 minute to 7 days');
+  }
+  t.folder = b.folder ? String(b.folder) : null;
+  if (t.folder && !settings.workspace.folders.includes(t.folder)) throw new Error('That folder is not trusted');
+  // The tools of a task: "serverId/tool" keys. A tool that changes files or runs a
+  // command is never allowed — nobody is there to approve it.
+  t.allowTools = (Array.isArray(b.allowTools) ? b.allowTools : []).map(String).slice(0, 50)
+    .filter((k) => !(k.startsWith('workspace/') && (ws.WRITE_TOOLS.has(k.slice(10)) || k.slice(10) === 'shell')));
+  return t;
+}
+// Run a tool without a user: the same code paths as /api/mcp/call, minus the approval.
+async function headlessCall(server, tool, args, session) {
+  if (!toolEnabled(server, tool)) return { isError: true, text: 'That tool is switched off in Lumen' };
+  if (server === 'builtin') return settings.web.enabled ? webtools.call(tool, args, settings.web) : { isError: true, text: 'The web tools are off' };
+  if (server === 'skills') return skills.call(tool, args || {}, { root: SKILLS_DIR, settings });
+  if (server === 'workspace') return workspace.call(tool, args || {}, { session, headless: true });
+  if (!settings.mcpServers.some((c) => c.id === server && c.enabled)) return { isError: true, text: 'Unknown or disabled server' };
+  try { return await mcp.call(server, tool, args); } catch (e) { return { isError: true, text: 'Tool call failed: ' + String(e.message || e).slice(0, 500) }; }
+}
+function headlessTools(task) {
+  const allow = new Set(task.allowTools || []);
+  const servers = [...builtinServers(), ...settings.mcpServers.filter((c) => c.enabled).map((c) => ({ id: c.id, name: c.name, ...mcp.info(c.id) }))];
+  const defs = [], map = new Map(), used = new Set();
+  for (const srv of servers) {
+    if (srv.status && srv.status !== 'connected') continue;
+    let prefix = String(srv.name).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24) || 'srv';
+    while (used.has(prefix)) prefix += '_';
+    used.add(prefix);
+    for (const t of srv.tools || []) {
+      const key = srv.id + '/' + t.name;
+      if (!allow.has(key) || !toolEnabled(srv.id, t.name)) continue;
+      if (srv.id === 'workspace' && (ws.WRITE_TOOLS.has(t.name) || t.name === 'shell')) continue;
+      const name = (prefix + '__' + t.name).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+      map.set(name, { server: srv.id, serverName: srv.name, tool: t.name });
+      defs.push({ type: 'function', function: { name, description: `[${srv.name}] ${t.description || ''}`.slice(0, 1000), parameters: t.inputSchema } });
+    }
+  }
+  return { defs, map };
+}
+const schedRunning = new Set();
+async function runSchedule(task) {
+  if (schedRunning.has(task.id)) return null;
+  schedRunning.add(task.id);
+  const now = nowStamp();
+  const chat = { id: crypto.randomUUID(), title: `Scheduled: ${task.name}`, titled: true, model: task.model, system: '', style: '', project: null,
+    pinned: false, created: now, updated: now, messages: [{ role: 'user', content: task.prompt, t: Date.now(), scheduled: task.id }] };
+  if (task.folder) settings.workspace.chats[chat.id] = { folder: task.folder, mode: 'ask' };
+  try {
+    const { defs, map } = headlessTools(task);
+    const convo = [{ role: 'user', content: task.prompt }];
+    for (let round = 0; round < 8; round++) {
+      const r = await fetch(`${OLLAMA}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: task.model, stream: false, messages: convo, options: { num_ctx: 8192 }, ...(defs.length ? { tools: defs } : {}) }) });
+      if (!r.ok) throw new Error((await r.text()).slice(0, 300));
+      const j = await r.json();
+      const msg = j.message || {};
+      const reply = { role: 'assistant', content: msg.content || '', model: task.model, t: Date.now() };
+      const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+      if (!calls.length) { chat.messages.push(reply); break; }
+      reply.toolCalls = [];
+      for (const tc of calls) {
+        const fn = tc.function || {}, hit = map.get(fn.name);
+        const call = { id: crypto.randomUUID(), name: fn.name, server: hit ? hit.server : null, serverName: hit ? hit.serverName : 'unknown', tool: hit ? hit.tool : fn.name,
+          arguments: fn.arguments && typeof fn.arguments === 'object' ? fn.arguments : {} };
+        const out = hit ? await headlessCall(hit.server, hit.tool, call.arguments, chat.id) : { isError: true, text: `Unknown or not allowed tool "${fn.name}".` };
+        call.status = out.isError ? 'error' : 'done'; call.result = String(out.text || '').slice(0, 20000);
+        reply.toolCalls.push(call);
+      }
+      chat.messages.push(reply);
+      convo.push({ role: 'assistant', content: reply.content, tool_calls: reply.toolCalls.map((c) => ({ function: { name: c.name, arguments: c.arguments } })) });
+      for (const c of reply.toolCalls) convo.push({ role: 'tool', tool_name: c.name, content: c.result || '(no result)' });
+    }
+    task.lastStatus = 'done';
+  } catch (e) {
+    chat.messages.push({ role: 'assistant', content: 'The scheduled task failed: ' + String(e.message || e).slice(0, 500), t: Date.now(), model: task.model });
+    task.lastStatus = 'failed';
+    console.warn(`Scheduled task ${task.name}: failed`);
+  } finally { schedRunning.delete(task.id); }
+  chat.updated = nowStamp();
+  chats[chat.id] = chat; save();
+  task.lastRun = Date.now(); task.lastChat = chat.id; task.runs = (task.runs || 0) + 1;
+  saveSettings();
+  return chat;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const t of settings.workspace.schedules) {
+    if (!t.enabled || schedRunning.has(t.id)) continue;
+    if (!t.nextRun) { t.nextRun = nextRunOf(t); saveSettings(); continue; }
+    if (t.nextRun <= now) { t.nextRun = nextRunOf(t, now); saveSettings(); runSchedule(t); }
+  }
+}, 5000).unref();
+
 const projectSummary = ({ files, ...p }) => ({ ...p, files: files.map(({ text, ...f }) => ({ ...f, chars: text.length })) });
 const summary = ({ messages, ...c }) => ({ ...c, count: messages.length });
 
@@ -409,6 +557,13 @@ async function api(req, res, url) {
         if (!toolEnabled('skills', String(b.tool))) return send(res, 200, { isError: true, text: 'That tool is switched off in Lumen' });
         return send(res, 200, await skills.call(String(b.tool), b.arguments || {}, { root: SKILLS_DIR, settings }));
       }
+      // The workspace tools: the folder of the chat, and the approval token of the user
+      // for every write (in the "ask" mode) and every command.
+      if (b.server === 'workspace') {
+        if (!settings.workspace.folders.length) return send(res, 200, { isError: true, text: 'There is no trusted folder' });
+        if (!toolEnabled('workspace', String(b.tool))) return send(res, 200, { isError: true, text: 'That tool is switched off in Lumen' });
+        return send(res, 200, await workspace.call(String(b.tool), b.arguments || {}, { session: b.session, approval: b.approval }));
+      }
       if (!settings.mcpServers.some((c) => c.id === b.server && c.enabled)) return send(res, 404, { error: 'Unknown or disabled server' });
       // A tool that is switched off never runs, not even when something asks for it directly.
       if (!toolEnabled(b.server, String(b.tool))) return send(res, 200, { isError: true, text: 'That tool is switched off in Lumen' });
@@ -421,12 +576,12 @@ async function api(req, res, url) {
       return send(res, 200, settings.mcpServers.map(view));
     }
     // The tool switches of the built-in servers (the web tools and the skills tools).
-    if ((id === 'builtin' || id === 'skills') && parts[2] === 'tools' && m === 'PUT') {
+    if ((id === 'builtin' || id === 'skills' || id === 'workspace') && parts[2] === 'tools' && m === 'PUT') {
       setTools(id, await readBody(req));
       return send(res, 200, builtinView(id) || { id });
     }
     // The built-in servers have no process, so they have no log.
-    if ((id === 'builtin' || id === 'skills') && parts[2] === 'logs' && m === 'GET') return send(res, 200, { lines: [] });
+    if ((id === 'builtin' || id === 'skills' || id === 'workspace') && parts[2] === 'logs' && m === 'GET') return send(res, 200, { lines: [] });
     const idx = settings.mcpServers.findIndex((c) => c.id === id);
     if (idx < 0) return send(res, 404, { error: 'not found' });
     const cur = settings.mcpServers[idx];
@@ -470,6 +625,102 @@ async function api(req, res, url) {
       delete settings.toolToggles[id]; // the switches of a removed server go with it
       saveSettings();
       return send(res, 200, { ok: true });
+    }
+  }
+
+  // ---- the workspace ---------------------------------------------------------
+  // Trusted folders, the folder and mode of a chat, the approval previews, the changes
+  // (diffs and revert), the shell runs and the scheduled tasks.
+  if (parts[0] === 'workspace') {
+    const W = settings.workspace;
+    const sub = parts[1] || '';
+    const view = () => ({ folders: W.folders, projects: W.projects, schedules: W.schedules, limits: ws.LIMITS,
+      warning: 'This is not a sandbox: an approved command runs with your own permissions.' });
+    if (!sub && m === 'GET') return send(res, 200, view());
+    if (sub === 'folders' && !parts[2] && m === 'POST') {
+      const b = await readBody(req);
+      let real;
+      try { real = ws.validateFolder(b.path, { dataDir: path.dirname(DATA_FILE) }); } catch (e) { return send(res, 400, { error: e.message }); }
+      if (W.folders.includes(real)) return send(res, 200, view());
+      if (W.folders.length >= ws.LIMITS.folders) return send(res, 400, { error: 'Too many trusted folders' });
+      W.folders.push(real); saveSettings();
+      return send(res, 200, view());
+    }
+    if (sub === 'folders' && parts[2] === 'remove' && m === 'POST') {
+      const b = await readBody(req);
+      W.folders = W.folders.filter((f) => f !== b.path);
+      for (const [k, v] of Object.entries(W.projects)) if (v === b.path) delete W.projects[k];
+      saveSettings();
+      return send(res, 200, view());
+    }
+    if (sub === 'projects' && parts[2] && m === 'PUT') {
+      if (!projects[parts[2]]) return send(res, 404, { error: 'not found' });
+      const b = await readBody(req);
+      if (b.folder && !W.folders.includes(b.folder)) return send(res, 400, { error: 'That folder is not trusted' });
+      if (b.folder) W.projects[parts[2]] = b.folder; else delete W.projects[parts[2]];
+      saveSettings();
+      return send(res, 200, view());
+    }
+    if (sub === 'session' && parts[2]) {
+      const sid = parts[2];
+      if (!ws.validSession(sid)) return send(res, 400, { error: 'Bad session' });
+      if (parts[3] === 'kill' && m === 'POST') return send(res, 200, { killed: workspace.killSession(sid) });
+      if (m === 'GET') return send(res, 200, wsConfig(sid) || { folder: null, mode: 'ask' });
+      if (m === 'PUT') {
+        const b = await readBody(req);
+        const folder = b.folder ? String(b.folder) : null;
+        if (folder && !W.folders.includes(folder)) return send(res, 400, { error: 'That folder is not trusted' });
+        const mode = WS_MODES.has(b.mode) ? b.mode : 'ask';
+        const cfg = { folder, mode };
+        // A saved chat keeps its workspace in the settings; a temporary chat only in memory.
+        if (chats[sid]) W.chats[sid] = cfg; else wsTemp.set(sid, cfg);
+        saveSettings();
+        return send(res, 200, wsConfig(sid) || { folder: null, mode });
+      }
+    }
+    if (sub === 'preview' && m === 'POST') {
+      const b = await readBody(req);
+      if (!ws.validSession(b.session)) return send(res, 400, { error: 'Bad session' });
+      try { return send(res, 200, workspace.preview(b.session, String(b.tool), b.arguments || {})); }
+      catch (e) { return send(res, 200, { error: String(e.message || e) }); }
+    }
+    if (sub === 'changes' && parts[2]) {
+      const sid = parts[2];
+      if (!ws.validSession(sid)) return send(res, 400, { error: 'Bad session' });
+      if (m === 'GET') return send(res, 200, workspace.changes(sid));
+      if (parts[3] === 'revert' && m === 'POST') {
+        const b = await readBody(req);
+        try { return send(res, 200, { reverted: workspace.revert(sid, b.path || null, W.folders), changes: workspace.changes(sid) }); }
+        catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+      }
+    }
+    if (sub === 'runs' && parts[2]) {
+      if (parts[3] === 'kill' && m === 'POST') return send(res, 200, { killed: workspace.kill(parts[2]) });
+      if (m === 'GET') {
+        if (!ws.validSession(parts[2])) return send(res, 400, { error: 'Bad session' });
+        return send(res, 200, workspace.listRuns(parts[2]));
+      }
+    }
+    if (sub === 'schedules') {
+      const tid = parts[2];
+      if (!tid && m === 'POST') {
+        if (W.schedules.length >= 20) return send(res, 400, { error: 'Too many scheduled tasks' });
+        let t;
+        try { t = cleanSchedule(await readBody(req)); } catch (e) { return send(res, 400, { error: e.message }); }
+        t.id = crypto.randomUUID(); t.enabled = true; t.created = Date.now(); t.nextRun = nextRunOf(t); t.runs = 0;
+        W.schedules.push(t); saveSettings();
+        return send(res, 200, t);
+      }
+      const t = W.schedules.find((x) => x.id === tid);
+      if (!t) return send(res, 404, { error: 'not found' });
+      if (parts[3] === 'run' && m === 'POST') { const c = await runSchedule(t); return send(res, 200, { chat: c ? c.id : null, task: t }); }
+      if (m === 'PUT') {
+        const b = await readBody(req);
+        if (typeof b.enabled === 'boolean') { t.enabled = b.enabled; if (t.enabled) t.nextRun = nextRunOf(t); }
+        saveSettings();
+        return send(res, 200, t);
+      }
+      if (m === 'DELETE') { W.schedules = W.schedules.filter((x) => x.id !== tid); saveSettings(); return send(res, 200, { ok: true }); }
     }
   }
 
@@ -807,7 +1058,7 @@ async function api(req, res, url) {
       chats[id].updated = nowStamp(); save();
       return send(res, 200, summary(chats[id]));
     }
-    if (id && m === 'DELETE') { delete chats[id]; save(); return send(res, 200, { ok: true }); }
+    if (id && m === 'DELETE') { delete chats[id]; save(); if (settings.workspace.chats[id]) { delete settings.workspace.chats[id]; saveSettings(); } return send(res, 200, { ok: true }); }
     if (!id && m === 'DELETE') { chats = {}; save(); return send(res, 200, { ok: true }); }
   }
 
