@@ -9,15 +9,15 @@ Steps 1 to 7 are built, tested and merged (PRs #1 to #7):
 attachments and vision, artifacts, projects, thinking and branching and auto titles, styles and memory,
 MCP tools with approval, command palette and shortcuts and dictation and web tools and installable app.
 
-Step 8 (quick wins) is built, tested and committed on branch `step-8-quickwins` (not merged yet):
+Step 8 (quick wins) is built, tested and merged (PR #9):
 token usage and a usage dialog, read aloud, find in conversation, Markdown export, chat tabs,
 try another model and side-by-side compare, and a troubleshooting dialog with a diagnostic report.
 
-Step 9 (import from Claude Desktop) is built, tested and committed on branch `step-9-claude-import` (not merged yet):
+Step 9 (import from Claude Desktop) is built, tested and merged (PR #10):
 a review dialog for Claude's MCP servers, extension bundles (`.mcpb`/`.dxt`), a switch per tool,
 a per-server log viewer and "Reload all".
 
-Step 10 (skills) is built, tested and committed on branch `step-10-skills` (not merged yet):
+Step 10 (skills) is built, tested and merged (PR #11):
 a skill is a folder with a `SKILL.md`; a Skills dialog (list, switch on and off, write and edit,
 upload a zip or loose files, delete), two starter skills, the skills tools `use_skill` and
 `read_skill_file`, and the enabled skills in the system prompt.
@@ -386,7 +386,7 @@ Handoff notes:
   and cross-pane refresh over `BroadcastChannel`. This avoids refactoring the global state in `app.js`. Side Chat can reuse the same embed mechanism.
 - Tests: two panes stream independently; side chat leaves main messages unchanged; insert works; embed mode layout; sidebar refresh across panes.
 
-**Done** on branch `step-11-side-split` (tests: `tests/step11-side-split.js` — 82 assertions; `tests/run.sh 11`).
+**Done** on branch `step-11-side-split` (tests: `tests/step11-side-split.js` — 115 assertions; `tests/run.sh 11`).
 Handoff notes:
 
 - **New file:** `public/features/splitview.js` (the whole feature: the embed mode, the channel, the side chat, the split view).
@@ -449,6 +449,25 @@ Fix round 1 (same branch, second and third commit):
   for the title of the new chat, the model of the pane is checked against the model the test asked for, the embed mode is checked with
   `getComputedStyle` instead of a comparison of the header's HTML, a reload of the main window after a side chat was opened does not land
   on the side chat, and the seed of the side chat is checked against the numbers it says about itself.
+
+Fix round 2 (same branch, fourth commit — `splitview.js` and its test only):
+- **A pane does not act before it knows.** Before a pane opens the chat of its address it claims it (`{type:'pane', claim}`) and runs
+  a "who has what" round (`{type:'who'}` answered by `{type:'has', to}`), bounded at 400 ms so a lone pane still comes up. A chat
+  that another window has open **or has claimed** is taken; the pane then starts empty and says "Another window has this chat".
+  The main window runs the same round before it hands a chat to a new pane, and never hands out a chat it already gave to one of its frames.
+- **One resolution for a conflict both sides reach at once:** the main window always keeps the chat; between two panes the smaller id keeps it.
+  The side that keeps it announces again, so the other side gives it up.
+- **A pane that gave a chat up forgets it:** its address goes back to `/?embed=1` (`history.replaceState`) and the main window resets the
+  `src` of that frame, so a reloaded pane cannot take the chat back; the reloaded pane says why it is empty.
+- **The pane that moves away leaves no empty chat in the store:** the empty state after a move-away is temporary until the user types
+  or sends (a 2 s backstop lifts it), so the aborted turn of the pane does not save a "New Chat" with no messages.
+- **What the user typed while the pane was opening is kept** (it is appended to the opened chat, or the pane keeps its own chat if the user already wrote).
+- **The panes come back after a reload of the main window:** the chat of each frame is kept in `localStorage` under the id of the browser
+  tab (`sessionStorage` `lumen.win`), so two tabs of the app do not fight over the same frames; closing a pane forgets it and announces that its window is gone.
+- Two test fixes found on the full run: the harness waits for the pinned model to be listed before it picks it (the first page of a fresh
+  server waits for Ollama's capabilities of every model, which can take longer than the old fixed 1.5 s), and step 1 uses the pinned
+  `LUMEN_TEST_MODEL` when it has vision instead of the first vision model listed (that was the cloud model, so the prompt left the machine
+  despite the pin — and the cloud model returned an empty answer).
 
 ### Step 12: workspace agent (Cowork/Code-lite)
 Highest risk step. There is **no VM sandbox**, so keep it conservative.

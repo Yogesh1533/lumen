@@ -56,6 +56,17 @@ async function until(fn, ms = 20000, every = 200) {
 async function frameReady(sel, ms = 30000) {
   return await until(async () => await frameBool(sel, "!!(state && state.models && state.models.length && state.chat)"), ms, 250);
 }
+// The chat of a pane: a pane waits for the answers of the other windows before it
+// opens the chat of its address, so the test waits for the pane to have it.
+async function frameHasChat(sel, id, ms = 20000) {
+  return await until(async () => (await frameText(sel, 'String(state.chat && state.chat.id)')) === id, ms, 200);
+}
+async function frameHasSomeChat(sel, ms = 20000) {
+  return await until(async () => {
+    const s = await frameText(sel, 'String(state.chat && state.chat.id)');
+    return !!s && s !== 'null' && s !== 'undefined';
+  }, ms, 200);
+}
 // Wait for the turn of a frame to be over. The model may ask to use a skill (the
 // starter skills are in the system prompt): the approval card is answered like a user
 // would answer it ("Allow once") and the turn goes on.
@@ -130,7 +141,7 @@ const msgList = "JSON.stringify((state.chat ? state.chat.messages : []).map(m =>
   ok('the chat of the pane is a chat of the user', userChats.some((c) => c.id === paneChat), `${paneChat} vs ${chatA}`);
   ok('the chat of the pane is the most recent chat that the main window does not have open', paneChat === chatA, `${paneChat} vs ${chatA}`);
   ok('the chat of the pane is not the chat of the main window', !!paneChat && paneChat !== chatB, `${paneChat} vs ${chatB}`);
-  ok('the pane has the chat of its address', (await frameText('#splitFrame', 'String(state.chat && state.chat.id)')) === paneChat,
+  ok('the pane has the chat of its address', await frameHasChat('#splitFrame', paneChat),
     await frameText('#splitFrame', 'String(state.chat && state.chat.id)'));
   ok('the split pane is not sandboxed (it is Lumen, not an artifact)',
     (await ev(`document.querySelector('#splitFrame').getAttribute('sandbox')`)) === null);
@@ -194,6 +205,7 @@ const msgList = "JSON.stringify((state.chat ? state.chat.messages : []).map(m =>
   await ev(`document.querySelector('#sideChatBtn').click(); 1`);
   const sideUp = await frameReady('#sideFrame');
   ok('the side chat opens in a pane of its own', sideUp);
+  await frameHasSomeChat('#sideFrame');
   const sideId = await frameText('#sideFrame', 'String(state.chat && state.chat.id)');
   ok('the side chat is a chat record of its own', !!sideId && sideId !== 'undefined' && sideId !== mainId, `${sideId} vs ${mainId}`);
   const sideSrc = String(await ev(`document.querySelector('#sideFrame').getAttribute('src')`));
@@ -248,7 +260,8 @@ const msgList = "JSON.stringify((state.chat ? state.chat.messages : []).map(m =>
     let newSide = '';
     const gotSide = await until(async () => {
       const id = await frameText('#sideFrame', 'String(state.chat && state.chat.id)');
-      if (id && id !== oldSide) { newSide = id; return true; }
+      // The pane is empty while it comes up ("null"): the test waits for the chat.
+      if (id && id !== 'null' && id !== 'undefined' && id !== oldSide) { newSide = id; return true; }
       return false;
     }, 25000, 300);
     ok('a second side chat opens', !!newSide, String(newSide));
@@ -313,8 +326,18 @@ const msgList = "JSON.stringify((state.chat ? state.chat.messages : []).map(m =>
     // saves the whole list of the messages of a chat, so two windows on one chat take
     // each other's messages away.
     await ev(`openChat(${JSON.stringify(paneChat)}); 1`);
-    const moved = await until(async () => (await frameText('#splitFrame', 'String(state.chat && state.chat.id)')) !== paneChat, 20000, 300);
-    ok('the pane lets the chat go when the main window opens it', moved,
+    let seen = '';
+    const moved = await until(async () => {
+      const c = await frameText('#splitFrame', 'String(state.chat && state.chat.id)');
+      if (c !== 'NOFRAME' && c.indexOf('EXC') !== 0) seen = c;
+      return c !== paneChat && c !== 'NOFRAME' && c.indexOf('EXC') !== 0;
+    }, 20000, 300);
+    ok('the pane lets the chat go when the main window opens it', moved, `${paneChat} -> ${seen}`);
+    // The pane that gave the chat up is back (its address does not name the chat any
+    // more, so it comes back empty).
+    await frameReady('#splitFrame');
+    ok('the pane has no chat after it let the chat go',
+      (await frameText('#splitFrame', 'String(state.chat && state.chat.id)')) !== paneChat,
       await frameText('#splitFrame', 'String(state.chat && state.chat.id)'));
     // The main window writes in the chat — the message must survive on the server.
     const MARK_C = 'MAINWIN' + Date.now();
@@ -414,7 +437,243 @@ const msgList = "JSON.stringify((state.chat ? state.chat.messages : []).map(m =>
     ok('the server has no new chat of the temporary pane', chatsAfter === chatsBefore, `${chatsBefore} -> ${chatsAfter}`);
   }
 
-  // ---- 15. the tabs of a pane do not come back in the main window -------------
+  // ---- 15. a pane does not open the chat of the main window ------------------
+  {
+    // The main window has a chat of its own. A pane whose address names that very
+    // chat must not open it: the app saves the whole list of the messages of a
+    // chat, so two windows on one chat take each other's messages away.
+    const X = await mkChat('TAKEN BY THE MAIN WINDOW');
+    await ev(`openChat(${JSON.stringify(X)}); 1`);
+    await until(async () => (await ev(`state.chat && state.chat.id`)) === X, 15000, 200);
+    ok('the main window has a chat of its own', (await ev(`state.chat.id`)) === X, String(await ev(`state.chat.id`)));
+    await ev(`(() => {
+      const f = document.createElement('iframe');
+      f.id = 'paneTaken';
+      f.src = '/?embed=1&chat=' + ${JSON.stringify(X)};
+      document.body.appendChild(f);
+      return 1;
+    })()`);
+    const up = await frameReady('#paneTaken');
+    ok('the pane whose address names the chat of the main window starts', up);
+    // The pane must not open that chat — not at any moment of its coming up.
+    let ever = '';
+    for (let i = 0; i < 24; i++) {
+      const c = await frameText('#paneTaken', 'String(state.chat && state.chat.id)');
+      if (c === X) { ever = c; break; }
+      await sleep(120);
+    }
+    ok('the pane does not open the chat of the main window', !ever, ever || 'the pane was never on that chat');
+    // And it refuses the chat even when it is asked for it directly.
+    await frameEval('#paneTaken', `openChat(${JSON.stringify(X)}); 1`);
+    await sleep(1500);
+    ok('the pane refuses the chat of the main window',
+      (await frameText('#paneTaken', 'String(state.chat && state.chat.id)')) !== X,
+      await frameText('#paneTaken', 'String(state.chat && state.chat.id)'));
+    // The address of a pane that has no chat is /?embed=1: the pane took the chat
+    // out of its address when it gave it up.
+    ok('the address of the pane does not name the chat of the main window',
+      (await frameText('#paneTaken', 'location.search')) === '?embed=1',
+      await frameText('#paneTaken', 'location.search'));
+    // The message of the main window must survive on the server — also when the pane
+    // writes at the same time: the app saves the whole list of the messages of a
+    // chat, so two windows on one chat take each other's messages away.
+    const MARK = 'MAINONLY' + Date.now();
+    await ev(`(() => { state.chat.messages.push({ role: 'user', content: ${JSON.stringify(MARK)} }); return persist(); })()`);
+    await frameEval('#paneTaken', `(() => { state.chat.messages.push({ role: 'user', content: 'PANEONLY' + Date.now() }); return persist(); })()`);
+    await sleep(2500);
+    const rec = await call('GET', '/api/chats/' + X);
+    const msgs = (rec.json || {}).messages || [];
+    ok('the message of the main window survives on the server',
+      msgs.some((m) => (m.content || '').includes(MARK)),
+      JSON.stringify(msgs.map((m) => m.role)));
+  }
+
+  // ---- 16. the pane that gave its chat up and is reloaded -------------------
+  {
+    // The split view gives the pane a chat of its own. The main window takes that
+    // chat: the pane must give it up — in its address too, so that a reloaded pane
+    // cannot take it back.
+    await ev(`(() => { document.querySelector('#splitPane').hidden = true; document.querySelector('#sidePane').hidden = true; return 1; })()`);
+    // The src of the frame before the click: the app assigns the chat of the pane
+    // a moment after the click, so the test must wait for the src to change.
+    const srcBefore = String(await ev(`document.querySelector('#splitFrame').getAttribute('src') || ''`));
+    await ev(`document.querySelector('#splitBtn').click(); 1`);
+    let src = '';
+    const assigned = await until(async () => {
+      const s = String(await ev(`document.querySelector('#splitFrame').getAttribute('src') || ''`));
+      if (s !== srcBefore && s.indexOf('chat=') >= 0) { src = s; return true; }
+      return false;
+    }, 20000, 200);
+    const paneChat = decodeURIComponent((/[?&]chat=([^&]+)/.exec(src) || ['', ''])[1]);
+    ok('the split view gives the pane a chat of its own', assigned && !!paneChat, `${srcBefore} -> ${src}`);
+    const up = await frameReady('#splitFrame');
+    ok('the pane of the split view starts', up);
+    await sleep(1500);
+    ok('the pane has the chat of its address', await frameHasChat('#splitFrame', paneChat),
+      await frameText('#splitFrame', 'String(state.chat && state.chat.id)'));
+    // The main window takes the chat of the pane.
+    await ev(`openChat(${JSON.stringify(paneChat)}); 1`);
+    await until(async () => (await ev(`state.chat && state.chat.id`)) === paneChat, 15000, 200);
+    // The pane gives the chat up: the address of the pane does not name it any more
+    // (the address of a pane that has no chat is /?embed=1), so that a reloaded pane
+    // cannot take it back.
+    const gaveUp = await until(async () => {
+      const s = String(await ev(`document.querySelector('#splitFrame').getAttribute('src') || ''`));
+      return s.indexOf(paneChat) < 0;
+    }, 20000, 300);
+    ok('the pane gives the chat up when the main window takes it', gaveUp,
+      String(await ev(`document.querySelector('#splitFrame').getAttribute('src') || ''`)));
+    await frameReady('#splitFrame');
+    ok('the pane has no chat after it let the chat go',
+      (await frameText('#splitFrame', 'String(state.chat && state.chat.id)')) !== paneChat,
+      await frameText('#splitFrame', 'String(state.chat && state.chat.id)'));
+    // The pane is reloaded (the src of the frame is set again — the same thing a
+    // browser does when the user reloads the frame).
+    await ev(`(() => { const f = document.querySelector('#splitFrame'); f.src = f.getAttribute('src'); return 1; })()`);
+    await frameReady('#splitFrame');
+    await sleep(2000);
+    const paneNow = await frameText('#splitFrame', 'String(state.chat && state.chat.id)');
+    ok('the reloaded pane does not take the chat of the main window back', paneNow !== paneChat, `${paneNow} vs ${paneChat}`);
+    ok('the main window keeps its chat', (await ev(`state.chat.id`)) === paneChat, String(await ev(`state.chat.id`)));
+    // The message of the main window must survive on the server — also when the
+    // reloaded pane writes at the same time.
+    const MARK = 'MAINAFTER' + Date.now();
+    await ev(`(() => { state.chat.messages.push({ role: 'user', content: ${JSON.stringify(MARK)} }); return persist(); })()`);
+    await frameEval('#splitFrame', `(() => { state.chat.messages.push({ role: 'user', content: 'PANEAFTER' + Date.now() }); return persist(); })()`);
+    await sleep(2500);
+    const rec = await call('GET', '/api/chats/' + paneChat);
+    const msgs = (rec.json || {}).messages || [];
+    ok('the message of the main window survives on the server',
+      msgs.some((m) => (m.content || '').includes(MARK)),
+      JSON.stringify(msgs.map((m) => m.role)));
+  }
+
+  // ---- 17. the two buttons of the app, one after the other -------------------
+  {
+    // The side chat and the split view, one right after the other: the two panes
+    // must not carry the same chat. The main window assigns the chat of the second
+    // pane only after the other windows have answered a "who has what" round.
+    // Both frames get their chat a moment after the click: the test waits for the
+    // src of the two frames to change. The panes are closed first — the split view
+    // is a toggle.
+    await ev(`(() => { document.querySelector('#splitPane').hidden = true; document.querySelector('#sidePane').hidden = true; return 1; })()`);
+    const sideSrcBefore = String(await ev(`document.querySelector('#sideFrame').getAttribute('src') || ''`));
+    const splitSrcBefore = String(await ev(`document.querySelector('#splitFrame').getAttribute('src') || ''`));
+    await ev(`document.querySelector('#sideChatBtn').click(); 1`);
+    await ev(`document.querySelector('#splitBtn').click(); 1`);
+    const changed = await until(async () => {
+      const a = String(await ev(`document.querySelector('#sideFrame').getAttribute('src') || ''`));
+      const b = String(await ev(`document.querySelector('#splitFrame').getAttribute('src') || ''`));
+      return a !== sideSrcBefore && b !== splitSrcBefore;
+    }, 20000, 200);
+    ok('the two frames get their chat', changed, `${sideSrcBefore} / ${splitSrcBefore}`);
+    const sideUp = await frameReady('#sideFrame');
+    const splitUp = await frameReady('#splitFrame');
+    ok('the side chat is up', sideUp);
+    ok('the split view is up', splitUp);
+    await sleep(2500);
+    const sideSrc = String(await ev(`document.querySelector('#sideFrame').getAttribute('src') || ''`));
+    const splitSrc = String(await ev(`document.querySelector('#splitFrame').getAttribute('src') || ''`));
+    const sideChat = decodeURIComponent((/[?&]chat=([^&]+)/.exec(sideSrc) || ['', ''])[1]);
+    const splitChat = decodeURIComponent((/[?&]chat=([^&]+)/.exec(splitSrc) || ['', ''])[1]);
+    ok('the two frames do not name the same chat',
+      !!sideChat && !!splitChat && sideChat !== splitChat, `${sideSrc} / ${splitSrc}`);
+    const sideId = await frameText('#sideFrame', 'String(state.chat && state.chat.id)');
+    const splitId = await frameText('#splitFrame', 'String(state.chat && state.chat.id)');
+    const mainId = String(await ev(`state.chat.id`));
+    ok('the split pane has a chat of its own', !!splitId && splitId !== 'null' && splitId !== 'undefined', splitId);
+    ok('the two panes do not have the same chat', sideId !== splitId, `${sideId} vs ${splitId}`);
+    ok('the split pane does not have the chat of the main window', splitId !== mainId, `${splitId} vs ${mainId}`);
+    ok('the side pane does not have the chat of the main window', sideId !== mainId, `${sideId} vs ${mainId}`);
+  }
+
+  // ---- 18. a pane that moves away leaves no empty chat -----------------------
+  {
+    // The turn of a pane that is aborted by a move-away saves the chat that the
+    // move-away put in the place of the old one — and a chat without an id is a NEW
+    // chat ("New Chat", no messages). The store of the user must not gain it.
+    const Y = await mkChat('MOVING PANE');
+    await ev(`(() => {
+      const f = document.createElement('iframe');
+      f.id = 'paneMove';
+      f.src = '/?embed=1&chat=' + ${JSON.stringify(Y)};
+      document.body.appendChild(f);
+      return 1;
+    })()`);
+    await frameReady('#paneMove');
+    await sleep(1500);
+    ok('the pane has the chat of its address', await frameHasChat('#paneMove', Y),
+      await frameText('#paneMove', 'String(state.chat && state.chat.id)'));
+    // The pane has a turn in flight. The app's own sequence of an aborted turn is:
+    // the abort ends the turn and the turn saves the chat that is in the composer.
+    // The test drives that sequence itself, so it does not depend on the speed of
+    // the model.
+    await frameEval('#paneMove', `(() => {
+      const ac = new AbortController();
+      state.streaming = ac;
+      ac.signal.addEventListener('abort', () => {
+        state.streaming = null;
+        setTimeout(() => { persist(); }, 150);   // the turn saves what is in the composer
+      });
+      return 1;
+    })()`);
+    const idsBefore = ((await call('GET', '/api/chats')).json || []).map((c) => c.id);
+    // The main window takes the chat: the pane must give it up.
+    await ev(`openChat(${JSON.stringify(Y)}); 1`);
+    await until(async () => (await ev(`state.chat && state.chat.id`)) === Y, 15000, 200);
+    await sleep(3000);
+    const idsAfter = ((await call('GET', '/api/chats')).json || []).map((c) => c.id);
+    const added = idsAfter.filter((id) => !idsBefore.includes(id));
+    const empty = [];
+    for (const id of added) {
+      const r = await call('GET', '/api/chats/' + id);
+      if (!((r.json || {}).messages || []).length) empty.push(id);
+    }
+    ok('the store of the user gains no empty chat when a pane moves away', empty.length === 0,
+      `added=${JSON.stringify(added)} empty=${JSON.stringify(empty)}`);
+    // The pane gave the chat up: it has no chat, and its own address does not name
+    // the chat any more (the address of a pane that has no chat is /?embed=1), so
+    // that a reloaded pane cannot take the chat back.
+    ok('the pane has no chat after it let the chat go',
+      (await frameText('#paneMove', 'String(state.chat && state.chat.id)')) !== Y,
+      await frameText('#paneMove', 'String(state.chat && state.chat.id)'));
+    ok('the address of the pane does not name the chat any more',
+      (await frameText('#paneMove', 'location.search')) === '?embed=1',
+      await frameText('#paneMove', 'location.search'));
+  }
+
+  // ---- 19. the picker of a pane holds the chat of the pane -------------------
+  {
+    // In a conflict the chat of the pane is in the exclusion list of its own
+    // picker: the conversation of the pane must always be in it.
+    const Z = await mkChat('PICKER OWN CHAT');
+    await ev(`(() => {
+      const f = document.createElement('iframe');
+      f.id = 'panePick';
+      f.src = '/?embed=1&chat=' + ${JSON.stringify(Z)};
+      document.body.appendChild(f);
+      return 1;
+    })()`);
+    await frameReady('#panePick');
+    await sleep(1500);
+    ok('the pane has the chat of its address', await frameHasChat('#panePick', Z),
+      await frameText('#panePick', 'String(state.chat && state.chat.id)'));
+    // The conflict: another window has the same chat open. The record of a peer is an
+    // object (the chat it has open and the chat it claims); the test fills the old
+    // shape too, so that the check is not a matter of the shape of the record.
+    const injected = await frameEval('#panePick', `(() => {
+      svPeers.set('other-window', { chat: ${JSON.stringify(Z)}, claim: null, frame: '' });
+      svPeers.set('other-window-old', ${JSON.stringify(Z)});
+      svFillPicker();
+      return 1;
+    })()`);
+    ok('the conflict is put in front of the pane', String(injected) === '1', String(injected));
+    await sleep(1500);
+    const opts = await frameText('#panePick', "JSON.stringify([...document.querySelectorAll('#embedChatSel option')].map(o => o.value))");
+    ok('the picker of the pane holds the chat of the pane itself', opts.includes(Z), opts.slice(0, 200));
+  }
+
+  // ---- 20. the tabs of a pane do not come back in the main window -------------
   {
     await ev(`document.querySelector('#sideChatBtn').click(); 1`);
     const sideUp2 = await frameReady('#sideFrame');
@@ -434,9 +693,17 @@ const msgList = "JSON.stringify((state.chat ? state.chat.messages : []).map(m =>
     await sleep(1200);   // the app restores its tabs and opens the active one
     const landed = String(await ev(`state.chat ? state.chat.id : ''`));
     ok('the main window does not come back on the chat of the side chat', landed !== sideId2, `${landed} vs ${sideId2}`);
+    // The panes come back too: the src of the frames is remembered, per window, in
+    // the localStorage of the app.
+    const sideSrc2 = String(await ev(`document.querySelector('#sideFrame').getAttribute('src') || ''`));
+    ok('the side chat comes back after the reload of the main window', /[?&]chat=/.test(sideSrc2), sideSrc2);
+    const splitSrc2 = String(await ev(`document.querySelector('#splitFrame').getAttribute('src') || ''`));
+    ok('the split view comes back after the reload of the main window', /[?&]chat=/.test(splitSrc2), splitSrc2);
+    ok('the app boots in the panes that came back', await frameReady('#sideFrame') && await frameReady('#splitFrame'),
+      `${sideSrc2} / ${splitSrc2}`);
   }
 
-  // ---- 16. the stamps of the server are strictly increasing --------------------
+  // ---- 21. the stamps of the server are strictly increasing --------------------
   {
     // The clock of the server: 1000 calls in a tight loop must give 1000 strictly
     // increasing values. With Date.now() they are all the same millisecond — and
