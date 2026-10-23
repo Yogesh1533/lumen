@@ -15,6 +15,21 @@ Needs **Node 22+** (22 is the current LTS; Node 18 and 20 are end-of-life).
 
 Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA` (data/chats.json).
 
+### Desktop app (Electron)
+
+```bash
+npm install             # Electron is a dev dependency (its install script is approved in package.json)
+npm run desktop         # starts the server inside the app, or uses a Lumen that already runs on PORT
+```
+
+- The window shows the same app as the browser, from `http://127.0.0.1:PORT`, with context isolation, the sandbox and no Node.js in the page; it never leaves that origin (a web link opens in your browser). One instance only: a second start hands its link or files to the first window.
+- **Quick Entry** (Alt+Cmd/Ctrl+L): a small window on top of everything; Enter sends the text to a new chat. **Dictation** (Alt+Cmd/Ctrl+D): press to start, press again to stop (Electron has no global key-up). Dictation uses Chromium's speech service, which may not work inside Electron.
+- **Tray / menu bar:** Show Lumen, Quick Entry, "Keep running when the window is closed", "Open at login", Quit. The same two switches are in Settings > Desktop app.
+- **Notifications** (native) when a reply finishes or a tool call waits for approval while the window is not in front.
+- **Open with Lumen** / drop a file on its icon attaches it (at most 20 MB per file). **`lumen://` links:** `lumen://chat/<id>` opens a chat; `lumen://new?text=…` puts the text into the message box and never sends it. The packaged app registers the scheme; in development set `LUMEN_DESKTOP_REGISTER=1`.
+- **Packaging (untested):** `npm run dist:mac` runs `electron-builder` (downloaded by `npx`) for an **unsigned** macOS app in `dist/`. macOS Gatekeeper blocks an unsigned app: right-click > Open the first time, or `xattr -dr com.apple.quarantine Lumen.app`. The packaged app keeps its data in its profile folder (`~/Library/Application Support/Lumen/data`).
+- If `npx electron --version` says Electron failed to install (seen with Node 26: the zip extraction stops after one file), extract the cached zip by hand: `ditto -x -k ~/Library/Caches/electron/*/electron-v*-darwin-*.zip node_modules/electron/dist && printf 'Electron.app/Contents/MacOS/Electron' > node_modules/electron/path.txt` (check its sha256 against `node_modules/electron/checksums.json` first).
+
 ## Features
 
 - Streaming chat with stop, regenerate, edit-and-resend, delete, copy
@@ -108,6 +123,7 @@ Env vars: `PORT` (3100), `OLLAMA_BASE_URL` (http://127.0.0.1:11434), `LUMEN_DATA
 - The second pane of the split view and the side chat are Lumen itself (the same origin, the same rights as the window you are in — they are not sandboxed, and they can use the API). Only the artifact preview is kept apart.
 - Web pages and search results are untrusted text that the model will read. Keep tool approval on, and be wary of approving other tools right after a model has read a page you don't trust. A Brave API key is stored in plain text in `data/settings.json` (never sent back to the browser).
 - Dictation is not local: see above.
+- The desktop app adds no new door: the page has no Node.js, the bridge (`window.lumenDesktop`) has five named calls, the main process only answers the main frame of its own window (never an iframe, never another page), and the window cannot navigate away from the local origin. A `lumen://` link can only open a chat or fill the message box — it never sends anything.
 
 ## Development
 

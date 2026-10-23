@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "app": "node bin/lumen-app.js",
-    "test": "tests/run.sh"
+    "test": "tests/run.sh",
+    "desktop": "electron desktop/main.js",
+    "dist:mac": "npx --yes electron-builder@26 --mac --dir"
   },
   "engines": {
     "node": ">=22"
@@ -19,5 +21,48 @@
   },
   "bin": {
     "lumen": "bin/lumen-app.js"
+  },
+  "devDependencies": {
+    "electron": "^38.8.6"
+  },
+  "allowScripts": {
+    "electron@38.8.6": true
+  },
+  "build": {
+    "appId": "local.lumen.app",
+    "productName": "Lumen",
+    "files": [
+      "server.js",
+      "mcp.js",
+      "webtools.js",
+      "claude.js",
+      "zip.js",
+      "skills.js",
+      "stamp.js",
+      "workspace.js",
+      "starter-skills/**",
+      "public/**",
+      "desktop/**",
+      "package.json",
+      "node_modules/**"
+    ],
+    "extraMetadata": {
+      "main": "desktop/main.js"
+    },
+    "protocols": [
+      {
+        "name": "Lumen",
+        "schemes": [
+          "lumen"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "identity": null,
+      "category": "public.app-category.productivity"
+    }
   }
 }

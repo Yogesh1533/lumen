@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Lumen Quick Entry</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b1b1f; color: #eee; font: 15px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; -webkit-app-region: drag; }
+  form { display: flex; align-items: center; gap: 10px; height: 100%; padding: 0 14px; box-sizing: border-box; }
+  input { flex: 1; font: inherit; font-size: 18px; color: inherit; background: transparent; border: 0; outline: 0; -webkit-app-region: no-drag; }
+  span { opacity: .6; font-size: 12px; }
+</style>
+</head>
+<body>
+<form id="f"><span>✦</span><input id="q" placeholder="Ask Lumen… (Enter sends to a new chat, Esc closes)" autocomplete="off" autofocus><span>↵</span></form>
+<script>
+  const q = document.getElementById('q');
+  document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); const t = q.value; q.value = ''; window.quickEntry.submit(t); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { q.value = ''; window.quickEntry.close(); } });
+  window.quickEntry.onReset(() => { q.value = ''; q.focus(); });
+</script>
+</body>
+</html>

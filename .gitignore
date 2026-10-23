@@ -4,3 +4,4 @@ data/
 *.log
 .claude/
 .superpowers/
+dist/
