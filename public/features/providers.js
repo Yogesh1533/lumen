@@ -36,8 +36,8 @@ function pvAsk(model, dest) {
   });
 }
 const pvPrevGen = hooks.beforeGenerate;
-hooks.beforeGenerate = async (model, c) => {
-  if (pvPrevGen && (await pvPrevGen(model, c)) === false) return false;
+hooks.beforeGenerate = async (model, c, from) => {
+  if (pvPrevGen && (await pvPrevGen(model, c, from)) === false) return false;
   const dest = pvDest(model);
   if (!dest) return true;
   const proj = pvProject(c);

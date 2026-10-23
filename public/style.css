@@ -405,3 +405,13 @@ pre.preview { margin: 6px 0; padding: 8px; border-radius: 6px; background: var(-
 .chat .wait { margin-left: 4px; font-size: 11px; padding: 0 6px; border-radius: 9px; background: #f59e0b; color: #111; }
 .seg button.on { font-weight: 600; text-decoration: underline; }
 @media (max-width: 900px) { #wsPane { position: fixed; z-index: 6; inset: 0 0 0 auto; width: 100%; min-width: 0; } }
+
+/* ---- step 15: research, AI artifacts, the library ---- */
+.aibadge { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: #7c3aed; color: #fff; }
+.aibadge.busy { animation: aipulse 1s ease-in-out infinite; }
+@keyframes aipulse { 50% { opacity: .45; } }
+#researchBtn[aria-pressed="true"] { background: var(--accent, #2563eb); color: #fff; }
+.wsbar.research details { max-width: 100%; }
+.wsbar.research ol { max-height: 160px; overflow: auto; margin: 4px 0; font-size: 12px; }
+.libitem { display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--border); padding: 6px 0; }
+.libitem .tt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

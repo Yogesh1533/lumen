@@ -52,7 +52,11 @@ const hooks = {
   onAwait: null,       // (call, chat, waiting) a tool call starts or stops waiting for approval
   onCancelTools: null, // () the user stopped the tool calls
   onToolResult: null,  // (call, chat) after a tool call has run
-  beforeGenerate: null,// async (model, chat) => false to not send (e.g. no consent for a cloud model)
+  beforeGenerate: null,// async (model, chat, from) => false to not send (e.g. no consent for a cloud model);
+                       // `from` is undefined for a turn of the chat, 'compare' or 'artifact' otherwise
+  artDoc: null,        // (doc, artifact) => doc (the document of the artifact preview)
+  onSystem: null,      // (system, chat) => system (the system prompt of a request)
+  maxToolRounds: null, // (chat) => the number of tool rounds a turn may take
 };
 
 // ---- utilities -----------------------------------------------------------
@@ -165,7 +169,7 @@ function renderArtifact() {
   $('#artPrev').disabled = i === 0; $('#artNext').disabled = i === list.length - 1;
   $('#tabPreview').classList.toggle('on', tab === 'preview'); $('#tabCode').classList.toggle('on', tab === 'code');
   $('#artFrame').hidden = tab !== 'preview'; $('#artCode').hidden = tab !== 'code';
-  if (tab === 'preview') $('#artFrame').srcdoc = artDoc(a); else $('#artCode').textContent = a.code;
+  if (tab === 'preview') $('#artFrame').srcdoc = hooks.artDoc ? hooks.artDoc(artDoc(a), a) : artDoc(a); else $('#artCode').textContent = a.code;
 }
 function openArtifact(mi, n, tab = 'preview') {
   state.art.list = collectArtifacts();
@@ -228,7 +232,8 @@ function fullSystem(chatSystem) {
   if (p && p.files.length) parts.push('Reference documents for this project. Use them when relevant and cite the file name.\n' +
     p.files.map((f) => `<document name="${f.name}">\n${f.text}\n</document>`).join('\n'));
   if (chatSystem && chatSystem.trim()) parts.push(chatSystem.trim());
-  return parts.join('\n\n');
+  const sys = parts.join('\n\n');
+  return hooks.onSystem ? (hooks.onSystem(sys, state.chat) || sys) : sys;
 }
 async function loadProjects() { state.projects = await api('/projects'); renderProjects(); }
 function renderProjects() {
@@ -1006,7 +1011,8 @@ async function generate(fork, model) {
   if (ownsFork) { finishFork(fork, reply); fork.finished = true; }
   const caps = (state.models.find((m) => m.id === useModel) || { caps: [] }).caps;
   const canThink = caps.includes('thinking');
-  const toolSet = state.toolsOn && trailingToolRounds(c.messages) < MAX_TOOL_ROUNDS ? buildTools() : null;
+  const maxRounds = hooks.maxToolRounds ? (hooks.maxToolRounds(c) || MAX_TOOL_ROUNDS) : MAX_TOOL_ROUNDS;
+  const toolSet = state.toolsOn && trailingToolRounds(c.messages) < maxRounds ? buildTools() : null;
   if (toolSet && !caps.includes('tools')) { if (!state.warnedTools) toast(`${useModel} does not support tools — answering without them`); state.warnedTools = true; }
   const useTools = toolSet && caps.includes('tools') ? toolSet : null;
   renderAll();
