@@ -31,12 +31,16 @@ The server stamps the chats with a monotonic clock (`stamp.js`): the stamps are 
 so two chats made in the same millisecond never tie and "continue last chat" always opens the chat
 that was updated last (it used to open the older one of the two).
 
-Step 12 (workspace agent) is built, tested and committed on branch `step-12-workspace`:
+Step 12 (workspace agent) is built, tested and merged (PR #13):
 trusted folders, seven workspace tools kept inside the folder of the chat, the Ask and Auto-edit modes, approval
 cards with the diff of an edit and the exact command, a Changes pane with revert, a Terminal pane with Stop, the
 "needs your input" badge and notification, and scheduled tasks.
 
-**Next: steps 13 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 13 (desktop shell) is built, tested and committed on branch `step-13-electron`: an Electron app with the server in
+the process, a locked-down window, one instance, Quick Entry, a dictation toggle, tray, native notifications, open-with,
+`lumen://` links and launch at login. The packaging config is there but untested.
+
+**Next: steps 14 and 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -90,6 +94,8 @@ Run: `npm start` (port 3100) or `npm run app`. Node 22+. Ollama at `http://127.0
 - A leftover headless Chrome from a crashed test run keeps the CDP debug port **and its old profile**, so the next run silently drives the stale
   page (it failed step 4 that way: the old profile had thinking switched off). `tests/lib/cdplib.js` now stops whatever listens on the debug port
   before starting a fresh browser, and kills the browser when the test process exits.
+- npm 11 blocks install scripts until a package is approved (`allowScripts` in `package.json`; `electron` is approved). With Node 26
+  the Electron install script still stops after extracting one file (extract-zip); see the README for the `ditto` workaround.
 - This repo may be worked on from a git worktree. Do not run git in a different checkout than the session is bound to.
 
 ## 3. Models
@@ -531,6 +537,24 @@ Handoff notes:
 - Packaging: `npm run desktop` for dev; `electron-builder` config for an unsigned macOS app (note Gatekeeper). Allow the guard to accept the Electron origin.
 - Tests: Electron launched with `--remote-debugging-port` and driven through CDP (the REA MCP's `capture_electron_scenario` can also be used): window loads, single-instance, IPC for Quick Entry
   via a test-only hook. **Needs manual verification:** global hotkeys, tray, notifications, login item.
+
+**Done** on branch `step-13-electron` (tests: `tests/step13-electron.js` — 51 assertions; `tests/run.sh 13`; a window opens on the screen while it runs).
+Handoff notes:
+- **New files:** `desktop/main.js` (the main process), `desktop/preload.js` (the bridge `window.lumenDesktop`: `platform`, `on`,
+  `notify`, `prefs`, `info`, plus `test` in the test mode only), `desktop/quick-preload.js` and `desktop/quick.html` (Quick Entry, with a
+  strict CSP), `public/features/desktop.js` (the page side; it does nothing in a browser). `package.json`: `npm run desktop`,
+  `npm run dist:mac`, an `electron-builder` `build` block, `electron` as a dev dependency.
+- **The server:** `startServer()` uses a Lumen that already answers on `PORT` (so two servers never write one data folder), else it
+  `require`s `server.js` in the main process. The window loads `http://127.0.0.1:PORT`, so its `Origin` matches the `Host` and the
+  existing `guard()` accepts it — no change to `server.js` was needed. A packaged app puts `LUMEN_DATA` into its profile.
+- **The lock:** `will-navigate`/`will-redirect` keep the main window on the origin and the Quick Entry window on its own file;
+  `setWindowOpenHandler` denies every new window and hands http(s) links to the system browser; webviews are refused. The permission
+  handlers allow media, notifications, clipboard and fullscreen for the app's origin only. Every `ipcMain` handler checks that the
+  sender is the main frame of the main window on the origin (or the Quick Entry window on its file).
+- **The test mode** (`LUMEN_DESKTOP_TEST=1`) records instead of acting: external links, notifications, the login item. It registers no
+  global shortcuts and no protocol. `LUMEN_DESKTOP_PROFILE` gives the app its own `userData` (and with it its own single-instance lock).
+- Not covered (manual): the global shortcuts, the real tray icon and its menu, real notifications, the real login item, dictation inside
+  Electron, `open-file` from the Finder/Dock (the test calls the same code path through a test hook), packaging.
 
 ### Step 14: providers, cloud model labelling, secrets
 - **Cloud model awareness:** mark Ollama cloud models (name ends `:cloud`, or `/api/tags` shows `remote_host`) with a cloud badge; one-time consent

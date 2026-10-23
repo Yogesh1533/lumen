@@ -162,6 +162,8 @@ function wsBadges() {
   document.title = (any ? '(!) ' : '') + document.title.replace(/^\(!\) /, '');
 }
 function wsNotify(title, body, tag) {
+  // In the desktop app the notification is a native one.
+  if (window.lumenDesktop) { window.lumenDesktop.notify(title, body); return; }
   try {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     const n = new Notification(title, { body, tag });
