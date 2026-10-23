@@ -32,19 +32,12 @@
     "appId": "local.lumen.app",
     "productName": "Lumen",
     "files": [
-      "server.js",
-      "mcp.js",
-      "webtools.js",
-      "claude.js",
-      "zip.js",
-      "skills.js",
-      "stamp.js",
-      "workspace.js",
+      "*.js",
+      "!tests/**",
       "starter-skills/**",
       "public/**",
       "desktop/**",
-      "package.json",
-      "node_modules/**"
+      "package.json"
     ],
     "extraMetadata": {
       "main": "desktop/main.js"
@@ -62,7 +55,8 @@
         "dir"
       ],
       "identity": null,
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "icon": "public/icon-512.png"
     }
   }
 }
