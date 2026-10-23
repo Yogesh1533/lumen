@@ -286,7 +286,7 @@ async function streamCompare(model, out) {
   const system = fullSystem(c.system);
   const lastUser = c.messages.map((m) => m.role).lastIndexOf('user');
   const wire = c.messages.slice(0, lastUser + 1).map(toOllama).flat();
-  if (hooks.beforeGenerate && (await hooks.beforeGenerate(model, c)) === false) throw new Error('Not sent: ' + model + ' needs your consent');
+  if (hooks.beforeGenerate && (await hooks.beforeGenerate(model, c, 'compare')) === false) throw new Error('Not sent: ' + model + ' needs your consent');
   const r = await fetch('/api/chat', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, chat: c.id, project: c.project || null, system, options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)), messages: wire }),

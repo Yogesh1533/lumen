@@ -40,11 +40,15 @@ Step 13 (desktop shell) is built, tested and merged (PR #14): an Electron app wi
 the process, a locked-down window, one instance, Quick Entry, a dictation toggle, tray, native notifications, open-with,
 `lumen://` links and launch at login. The packaging config is there but untested.
 
-Step 14 (providers, cloud labelling, secrets) is built, tested and committed on branch `step-14-providers`: consent per
+Step 14 (providers, cloud labelling, secrets) is built, tested and merged (PR #15): consent per
 destination outside this computer (enforced by the server), Local only projects, a default model, OpenAI-compatible
 providers translated to Ollama's stream format, and a secret store (Keychain / Secret Service / encrypted file).
 
-**Next: step 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 15 (research and artifacts) is built, tested and merged (the last PR of the roadmap, branch `step-15-research-artifacts`): a research mode
+with one consent and a hard budget, AI-powered artifacts over a postMessage bridge, an artifact library and a sandboxed pop-out.
+
+**All steps of the roadmap (1 to 15) are built.** What is left is listed under "Not covered" in the notes of each step and
+in section 6 (manual checks). The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -601,6 +605,26 @@ Handoff notes:
   rate and size limits and a visible indicator. Link opening from an artifact asks first.
 - **Artifact library and pop-out:** page listing artifacts across chats (search, open, download); pop-out route served with `Content-Security-Policy: sandbox allow-scripts` so it keeps an opaque origin.
 - Tests: bridge round trip and limits; sandbox probes still blocked; library; CSP header on the pop-out; research run against the fake SearXNG with real `example.com` pages.
+
+**Done** on branch `step-15-research-artifacts` (tests: `tests/step15-research-artifacts.js` — 77 assertions, including a real research
+run with `gemma4:latest`; `tests/run.sh 15`).
+Handoff notes:
+- **New files:** `artifacts.js` (the server side of the library and the pop-out: the same extraction rule as `collectArtifacts` in the
+  page), `public/features/artifacts.js` (the bridge and its handler, the library dialog, the Pop out button), `public/features/research.js`.
+- **`app.js` grew three hooks:** `artDoc(doc, a)` (the bridge is injected after the doctype), `onSystem(system, chat)` (the research
+  instructions), `maxToolRounds(chat)` (40 rounds during a run). `beforeGenerate` got a third argument (`'compare'`, `'artifact'`,
+  or undefined for a turn of the chat) so that only a chat turn can start a research run.
+- **The bridge:** the artifact posts `{__lumen: 1, id, op, args}` to its parent; the page answers `{__lumen: 2, id, value|error}` with
+  target `'*'` to that one window (its origin is opaque, so it cannot be named). The page drops any message whose `source` is not
+  `#artFrame`'s window or whose origin is not `'null'`. Consent and storage live in `localStorage` (`lumen.artConsent`,
+  `lumen.artStore.<chat>|<title>`). `ask()` streams `/api/chat` with no tools and no history, with `chat`/`project` for the gate.
+- **The research run:** the budget is enforced in three places — `toolPolicy` refuses a call over it, `toolServer` removes the web
+  tools when both budgets are spent, the time is up, or the run is in its revision turn, and a timer stops the run a minute after the
+  deadline. `onToolResult` prefixes each page with `[Source N] <url>`. The final answer (no tool calls) becomes the report: the text
+  before the first `# ` title is dropped, a source list is added if missing, inner fences become `~~~`, and the reply's content becomes
+  a short line plus one ```` ```markdown ```` block, so the report is saved with the chat, shows up in the library and opens as an artifact.
+- Not covered by the tests: Brave as the research search provider (only the fake SearXNG), the report quality of bigger runs (the real
+  run here is small), a real link opening in a new tab (the test fakes `window.open`).
 
 ## 6. Testing
 

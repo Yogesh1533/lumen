@@ -11,6 +11,7 @@ const skills = require('./skills');
 const ws = require('./workspace');
 const secrets = require('./secrets');
 const providers = require('./providers');
+const artifacts = require('./artifacts');
 const { nowStamp } = require('./stamp');
 const mcp = new McpManager();
 // The clock of the server is exported, so that it can be tested directly. The test
@@ -679,6 +680,14 @@ async function api(req, res, url) {
     }
   }
 
+  // ---- the artifact library ---------------------------------------------------
+  if (parts[0] === 'artifacts' && m === 'GET') {
+    if (!parts[1]) return send(res, 200, artifacts.list(chats, url.searchParams.get('q') || ''));
+    const a = artifacts.find(chats, parts[1], parts[2], parts[3]);
+    if (!a) return send(res, 404, { error: 'not found' });
+    return send(res, 200, { ...a, title: artifacts.title(a), ext: artifacts.EXT[a.lang] });
+  }
+
   // ---- providers and consent ---------------------------------------------------
   // OpenAI-compatible providers (their keys go into the vault and never come back), and
   // the one-time consent per destination outside this computer.
@@ -1166,6 +1175,16 @@ http.createServer(async (req, res) => {
     const isApi = url.pathname.startsWith('/api/');
     if (!guard(req, res, isApi)) return;
     if (isApi) return await api(req, res, url);
+    // The pop-out of an artifact: /pop/<chat>/<message>/<block>. Another site may not
+    // load it (not even in a frame), and it is served with an opaque origin.
+    if (url.pathname.startsWith('/pop/')) {
+      if (req.headers['sec-fetch-site'] === 'cross-site') { res.writeHead(403); return res.end('Forbidden'); }
+      const [, , chatId, mi, n] = url.pathname.split('/');
+      const a = artifacts.find(chats, decodeURIComponent(chatId || ''), mi, n);
+      if (!a) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('No such artifact'); }
+      res.writeHead(200, { ...artifacts.POP_HEADERS, 'X-Frame-Options': 'SAMEORIGIN' });
+      return res.end(artifacts.page(a));
+    }
     let p = path.normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '');
     if (p === '/' || p === '\\' || !path.extname(p)) p = '/index.html'; // SPA fallback
     const file = path.join(PUBLIC, p);

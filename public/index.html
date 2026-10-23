@@ -41,6 +41,7 @@
       <label class="toggle" title="Temporary chats are not saved"><input type="checkbox" id="tempToggle"> Temporary</label>
       <button id="skillsBtn" class="ghost" title="Skills">🧩 Skills</button>
       <button id="toolsBtn" class="ghost" title="Tools &amp; MCP servers">🔧 Tools</button>
+      <button id="libBtn" class="ghost embed-hide" title="Artifact library: the artifacts of all chats">🗂</button>
       <button id="wsBtn" class="ghost embed-hide" title="Workspace: trusted folders and scheduled tasks">📂 Workspace</button>
       <button id="usageBtn" class="ghost" title="Token usage">📊 Usage</button>
       <button id="findBtn" class="ghost" title="Find in conversation">🔍</button>
@@ -84,10 +85,17 @@
       <span class="sub wswarn" title="An approved command runs with your own permissions">Not a sandbox</span>
     </div>
 
+    <div id="researchBar" class="wsbar research" hidden>
+      <b>🔎 Research</b><span id="rsStats"></span><span class="spacer"></span>
+      <details id="rsLog"><summary>Activity</summary><ol id="rsList"></ol></details>
+      <button type="button" id="rsStop" class="deny">Stop</button>
+    </div>
+
     <form id="composer">
       <div class="box" id="dropzone">
         <div id="chips"></div>
         <button id="attachBtn" class="attach" type="button" title="Attach files or images">＋</button>
+        <button id="researchBtn" class="attach" type="button" title="Research: search the web and write a report with sources" aria-pressed="false" hidden>🔎</button>
         <button id="micBtn" class="attach" type="button" title="Dictate (uses your browser's speech service)" hidden>🎤</button>
         <input id="fileInput" type="file" multiple hidden accept="image/*,.pdf,.txt,.md,.csv,.json,.js,.ts,.py,.html,.css,.yaml,.yml,.xml,.log,.sh,.sql,.go,.rs,.java,.c,.cpp,.h,.rb,.php,.swift,.kt,text/*">
         <textarea id="input" rows="1" placeholder="Send a message…  (Enter to send, Shift+Enter for newline)"></textarea>
@@ -106,6 +114,8 @@
         <button type="button" id="tabCode" role="tab">Code</button>
       </div>
       <div class="art-nav"><button type="button" id="artPrev" class="icon" title="Previous version">‹</button><span id="artPos"></span><button type="button" id="artNext" class="icon" title="Next version">›</button></div>
+      <span id="artAi" class="aibadge" hidden title="This artifact uses Lumen (the model or its storage)">✦ AI</span>
+      <button type="button" id="artPop" class="ghost" title="Open in a tab of its own (sandboxed)">Pop out</button>
       <button type="button" id="artCopy" class="ghost">Copy</button>
       <button type="button" id="artDownload" class="ghost">Download</button>
       <button type="button" id="artClose" class="icon" title="Close">✕</button>
@@ -252,6 +262,30 @@
     <div id="allowList"></div>
     <div class="dlg-actions"><span class="spacer"></span><button type="button" id="toolsClose" class="primary">Done</button></div>
   </div>
+</dialog>
+<dialog id="libDlg">
+  <div>
+    <h2>Artifacts</h2>
+    <div class="addrow"><input id="libQ" type="search" placeholder="Search titles, chats and code…" autocomplete="off"><span id="libN" class="sub"></span></div>
+    <div id="libList"></div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="libClose" class="primary">Done</button></div>
+  </div>
+</dialog>
+<dialog id="artConsentDlg">
+  <form method="dialog">
+    <h2>✦ This artifact wants to use Lumen</h2>
+    <p id="artConsentText"></p>
+    <p class="sub">It can then send prompts to the model of this chat (at most 10 a minute, each at most 4,000 characters) and keep up to 100 KB of data of its own. It cannot read your chats, your files or other artifacts' data.</p>
+    <div class="dlg-actions"><span class="spacer"></span><button value="no" class="ghost" id="artConsentNo">Deny</button><button value="yes" class="primary" id="artConsentYes">Allow for this artifact</button></div>
+  </form>
+</dialog>
+<dialog id="researchDlg">
+  <form method="dialog">
+    <h2>🔎 Start a research run?</h2>
+    <p id="researchText"></p>
+    <p class="sub">During the run the web tools run without asking for each call — only within this budget, only in this chat. Search queries go to your search provider and pages are fetched from the web; pages are untrusted text. Other tools still ask.</p>
+    <div class="dlg-actions"><span class="spacer"></span><button value="no" class="ghost" id="researchNo">Cancel</button><button value="yes" class="primary" id="researchYes">Start research</button></div>
+  </form>
 </dialog>
 <dialog id="provDlg">
   <div>
@@ -506,5 +540,7 @@
 <script src="/features/workspace.js"></script>
 <script src="/features/desktop.js"></script>
 <script src="/features/providers.js"></script>
+<script src="/features/artifacts.js"></script>
+<script src="/features/research.js"></script>
 </body>
 </html>
