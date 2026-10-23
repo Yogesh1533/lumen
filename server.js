@@ -9,6 +9,8 @@ const claude = require('./claude');
 const zip = require('./zip');
 const skills = require('./skills');
 const ws = require('./workspace');
+const secrets = require('./secrets');
+const providers = require('./providers');
 const { nowStamp } = require('./stamp');
 const mcp = new McpManager();
 // The clock of the server is exported, so that it can be tested directly. The test
@@ -38,11 +40,18 @@ const SETTINGS_FILE = path.join(path.dirname(DATA_FILE), 'settings.json');
 const EXT_DIR = path.join(path.dirname(DATA_FILE), 'extensions');
 // The skills of the user live in data/skills/<name>/ (a SKILL.md plus its own files).
 const SKILLS_DIR = path.join(path.dirname(DATA_FILE), 'skills');
-let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [], toolToggles: {}, extensions: {}, skills: {}, web: { enabled: false, provider: '', searxngUrl: '', braveKey: '' } };
+let settings = { memoryEnabled: true, memories: [], styles: [], mcpServers: [], toolToggles: {}, extensions: {}, skills: {}, web: { enabled: false, provider: '', searxngUrl: '', braveKey: '' }, providers: [], consent: {}, defaultModel: '' };
 try { const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); settings = { ...settings, ...saved, web: { ...settings.web, ...(saved.web || {}) } }; } catch { /* first run */ }
 if (!settings.toolToggles || typeof settings.toolToggles !== 'object') settings.toolToggles = {};
 if (!settings.extensions || typeof settings.extensions !== 'object') settings.extensions = {};
 if (!settings.skills || typeof settings.skills !== 'object') settings.skills = {};
+if (!Array.isArray(settings.providers)) settings.providers = [];
+if (!settings.consent || typeof settings.consent !== 'object') settings.consent = {};
+// The secrets live in the vault (the Keychain, the Secret Service or an encrypted file);
+// settings.json only holds references to them. They are put back into memory here.
+const VAULT = secrets.open({ dataDir: path.dirname(SETTINGS_FILE) });
+const vaultCache = new Map();
+const missingSecrets = secrets.resolve(settings, VAULT, vaultCache);
 // The workspace: the trusted folders, the folder and the mode of each chat, the folder
 // of each project and the scheduled tasks.
 settings.workspace = { folders: [], chats: {}, projects: {}, schedules: [], ...(settings.workspace || {}) };
@@ -72,13 +81,17 @@ function write(file, obj) {
   timers.set(file, setTimeout(() => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(obj));
+    // The settings are written as a copy without their secrets: a function makes it at
+    // the time of the write.
+    let data;
+    try { data = typeof obj === 'function' ? obj() : obj; } catch (e) { console.error('Not saved: ' + (e.message || e)); return; }
+    fs.writeFileSync(tmp, JSON.stringify(data));
     fs.renameSync(tmp, file);
   }, 150));
 }
 const save = () => write(DATA_FILE, chats);
 const saveProjects = () => write(PROJ_FILE, projects);
-const saveSettings = () => write(SETTINGS_FILE, settings);
+const saveSettings = () => write(SETTINGS_FILE, () => secrets.sanitize(settings, VAULT, vaultCache));
 // ---- secrets ---------------------------------------------------------------
 // A secret (an MCP env value, a sensitive extension setting) never leaves the server:
 // the browser only ever gets the keys and a mask like "••••1234".
@@ -176,7 +189,38 @@ const sameServer = (c, s) => (c.transport || 'stdio') === (s.transport || 'stdio
   && JSON.stringify(c.args || []) === JSON.stringify(s.args || [])
   && (c.url || '') === (s.url || '');
 
-const publicSettings = () => ({ ...settings, mcpServers: settings.mcpServers.map(viewCfg), extensions: undefined, web: { ...settings.web, braveKey: '', hasBraveKey: !!settings.web.braveKey } });
+const publicSettings = () => ({ ...settings, mcpServers: settings.mcpServers.map(viewCfg), extensions: undefined, web: { ...settings.web, braveKey: '', hasBraveKey: !!settings.web.braveKey },
+  providers: settings.providers.map(providers.viewProvider), secretStore: { kind: VAULT.kind, label: VAULT.label, warning: VAULT.warning, missing: missingSecrets } });
+
+// ---- where a prompt goes ----------------------------------------------------------------
+// A model that runs outside this computer: an Ollama cloud model, or a model of a
+// provider that is not on this computer. Its prompts need the one-time consent of the
+// user for that destination, and a project that is "Local only" never uses it.
+const remoteOllama = new Set();   // the cloud models Ollama reported last
+function destOf(model) {
+  const pm = providers.splitModel(model, settings.providers);
+  if (pm) return providers.isLocal(pm.provider.baseUrl) ? null : { id: pm.provider.id, label: `${pm.provider.name} (${new URL(pm.provider.baseUrl).host})` };
+  if (/:cloud$/i.test(String(model || '')) || remoteOllama.has(model)) return { id: 'ollama-cloud', label: "Ollama's cloud" };
+  return null;
+}
+// null when the prompt may go; otherwise the answer that stops it.
+function gate(model, { project, chat } = {}) {
+  const dest = destOf(model);
+  if (!dest) return null;
+  const pid = project || (chat && chats[chat] && chats[chat].project) || null;
+  if (pid && projects[pid] && projects[pid].localOnly) return { status: 403, body: { error: `This project is local only: ${model} runs outside this computer`, localOnly: true } };
+  if (!settings.consent[dest.id]) return { status: 403, body: { error: `Prompts to ${model} are processed by ${dest.label}. Allow it once in Lumen first.`, needsConsent: dest.id, label: dest.label } };
+  return null;
+}
+// One answer without streaming, from Ollama or a provider, in the shape of Ollama.
+async function chatOnce(model, messages, opts = {}) {
+  const pm = providers.splitModel(model, settings.providers);
+  if (pm) return providers.chatOnce(pm.provider, pm.model, messages, opts);
+  const r = await fetch(`${OLLAMA}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, stream: false, messages, ...(opts.think === false ? { think: false } : {}), options: opts.options || {}, ...(opts.tools && opts.tools.length ? { tools: opts.tools } : {}) }) });
+  if (!r.ok) throw new Error((await r.text()).slice(0, 300));
+  return r.json();
+}
 // The built-in servers are virtual MCP servers: they have no process, they only run
 // inside Lumen. The web tools appear when they are switched on, the skills server
 // appears when at least one skill is switched on (a skill is a folder on this computer).
@@ -285,11 +329,10 @@ async function runSchedule(task) {
   try {
     const { defs, map } = headlessTools(task);
     const convo = [{ role: 'user', content: task.prompt }];
+    const stop = gate(task.model, {});
+    if (stop) throw new Error(stop.body.error);
     for (let round = 0; round < 8; round++) {
-      const r = await fetch(`${OLLAMA}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: task.model, stream: false, messages: convo, options: { num_ctx: 8192 }, ...(defs.length ? { tools: defs } : {}) }) });
-      if (!r.ok) throw new Error((await r.text()).slice(0, 300));
-      const j = await r.json();
+      const j = await chatOnce(task.model, convo, { options: { num_ctx: 8192 }, tools: defs });
       const msg = j.message || {};
       const reply = { role: 'assistant', content: msg.content || '', model: task.model, t: Date.now() };
       const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
@@ -398,9 +441,13 @@ async function api(req, res, url) {
         // Ollama cloud models come back with a remote host; they run outside this machine.
         cloud: !!x.remote_host || /:cloud$/i.test(x.name),
       })));
-      return send(res, 200, { models });
+      for (const x of models) if (x.cloud) remoteOllama.add(x.id);
+      return send(res, 200, { models: [...models, ...providers.listModels(settings.providers)] });
     } catch (e) {
       console.warn(`Cannot reach Ollama at ${OLLAMA}: ${e.message || e}`);
+      // The models of the providers are still there without Ollama.
+      const pm = providers.listModels(settings.providers);
+      if (pm.length) return send(res, 200, { models: pm, warning: `Cannot reach Ollama at ${OLLAMA}` });
       return send(res, 502, { error: `Cannot reach Ollama at ${OLLAMA}`, models: [] });
     }
   }
@@ -476,11 +523,11 @@ async function api(req, res, url) {
   // Short chat title from the first exchange (non-streaming, thinking off for speed).
   if (parts[0] === 'title' && m === 'POST') {
     const b = await readBody(req);
+    // A title is a prompt too: the same consent and the same "local only" apply.
+    if (gate(b.model, { project: b.project, chat: b.chat })) return send(res, 200, { title: '' });
     try {
-      const r = await fetch(`${OLLAMA}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        model: b.model, stream: false, think: false, options: { temperature: 0.3, num_predict: 30 },
-        messages: [{ role: 'user', content: 'Write a title of 2 to 6 words for this conversation. Reply with only the title, no quotes or punctuation.\n\nUser: ' + String(b.user || '').slice(0, 600) + '\nAssistant: ' + String(b.assistant || '').slice(0, 600) }] }) });
-      const j = await r.json();
+      const j = await chatOnce(b.model, [{ role: 'user', content: 'Write a title of 2 to 6 words for this conversation. Reply with only the title, no quotes or punctuation.\n\nUser: ' + String(b.user || '').slice(0, 600) + '\nAssistant: ' + String(b.assistant || '').slice(0, 600) }],
+        { think: false, options: { temperature: 0.3, num_predict: 30 } });
       const title = String((j.message && j.message.content) || '').split('\n')[0].replace(/^["'`*#\s]+|["'`*.\s]+$/g, '').slice(0, 60);
       return send(res, 200, { title });
     } catch (e) { return send(res, 502, { error: String(e.message || e) }); }
@@ -489,12 +536,16 @@ async function api(req, res, url) {
   // Streaming chat: proxies Ollama /api/chat as NDJSON.
   if (parts[0] === 'chat' && m === 'POST') {
     const body = await readBody(req);
+    const stop = gate(body.model, { project: body.project, chat: body.chat });
+    if (stop) return send(res, stop.status, stop.body);
     const ac = new AbortController();
     res.on('close', () => ac.abort());
     try {
       const messages = [];
       if (body.system) messages.push({ role: 'system', content: body.system });
-      messages.push(...body.messages);
+      messages.push(...(Array.isArray(body.messages) ? body.messages : []));
+      const pm = providers.splitModel(body.model, settings.providers);
+      if (pm) return await providers.streamChat(pm.provider, pm.model, messages, { tools: body.tools, options: body.options || {} }, res, ac.signal);
       const r = await fetch(`${OLLAMA}/api/chat`, {
         method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: body.model, messages, stream: true, options: body.options || {},
@@ -626,6 +677,48 @@ async function api(req, res, url) {
       saveSettings();
       return send(res, 200, { ok: true });
     }
+  }
+
+  // ---- providers and consent ---------------------------------------------------
+  // OpenAI-compatible providers (their keys go into the vault and never come back), and
+  // the one-time consent per destination outside this computer.
+  if (parts[0] === 'providers') {
+    const id = parts[1];
+    if (!id && m === 'GET') return send(res, 200, { providers: settings.providers.map(providers.viewProvider), presets: providers.PRESETS, caps: providers.CAPS,
+      secretStore: { kind: VAULT.kind, label: VAULT.label, warning: VAULT.warning } });
+    if (!id && m === 'POST') {
+      if (settings.providers.length >= 20) return send(res, 400, { error: 'Too many providers' });
+      let p;
+      try { p = providers.cleanProvider(await readBody(req), {}, settings.providers.map((x) => x.id)); } catch (e) { return send(res, 400, { error: e.message }); }
+      settings.providers.push(p); saveSettings();
+      return send(res, 200, providers.viewProvider(p));
+    }
+    const idx = settings.providers.findIndex((x) => x.id === id);
+    if (idx < 0) return send(res, 404, { error: 'not found' });
+    const cur = settings.providers[idx];
+    if (parts[2] === 'models' && m === 'POST') {
+      try { return send(res, 200, { models: await providers.fetchModels(cur) }); } catch (e) { return send(res, 502, { error: String(e.message || e) }); }
+    }
+    if (m === 'PUT') {
+      try { settings.providers[idx] = providers.cleanProvider(await readBody(req), cur); } catch (e) { return send(res, 400, { error: e.message }); }
+      saveSettings();
+      return send(res, 200, providers.viewProvider(settings.providers[idx]));
+    }
+    if (m === 'DELETE') {
+      settings.providers.splice(idx, 1);
+      delete settings.consent[id];
+      saveSettings();
+      return send(res, 200, { ok: true });
+    }
+  }
+  if (parts[0] === 'consent') {
+    const b = m === 'GET' ? {} : await readBody(req);
+    const dest = String(b.dest || parts[1] || '');
+    const known = dest === 'ollama-cloud' || settings.providers.some((p) => p.id === dest);
+    if (m === 'GET') return send(res, 200, { consent: settings.consent });
+    if (!known) return send(res, 400, { error: 'Unknown destination' });
+    if (m === 'POST') { settings.consent[dest] = Date.now(); saveSettings(); return send(res, 200, { consent: settings.consent }); }
+    if (m === 'DELETE') { delete settings.consent[dest]; saveSettings(); return send(res, 200, { consent: settings.consent }); }
   }
 
   // ---- the workspace ---------------------------------------------------------
@@ -940,6 +1033,7 @@ async function api(req, res, url) {
     if (m === 'PUT') {
       const b = await readBody(req);
       if (typeof b.memoryEnabled === 'boolean') settings.memoryEnabled = b.memoryEnabled;
+      if (typeof b.defaultModel === 'string') settings.defaultModel = b.defaultModel.slice(0, 200);
       if (b.web && typeof b.web === 'object') {
         const w = settings.web;
         if (typeof b.web.enabled === 'boolean') w.enabled = b.web.enabled;
@@ -1011,6 +1105,7 @@ async function api(req, res, url) {
       const b = await readBody(req);
       if (typeof b.name === 'string') p.name = b.name.trim().slice(0, 80) || p.name;
       if (typeof b.instructions === 'string') p.instructions = b.instructions;
+      if (typeof b.localOnly === 'boolean') p.localOnly = b.localOnly;
       p.updated = Date.now(); saveProjects();
       return send(res, 200, projectSummary(p));
     }
@@ -1084,6 +1179,9 @@ http.createServer(async (req, res) => {
     if (!res.headersSent) send(res, 500, { error: String(e.message || e) });
   }
 }).listen(PORT, '127.0.0.1', () => {
+  // A secret that an older Lumen kept in settings.json moves into the vault now.
+  saveSettings();
+  if (missingSecrets.length) console.warn(`${missingSecrets.length} secret(s) were not found in the ${VAULT.label}: enter them again`);
   console.log(`Lumen running at http://localhost:${PORT} (Ollama: ${OLLAMA})`);
   for (const cfg of settings.mcpServers) if (cfg.enabled) mcp.connect(cfg).then((i) => {
     if (i.status === 'connected') console.log(`MCP ${cfg.name}: connected (${i.tools.length} tools)`);

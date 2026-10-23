@@ -36,11 +36,15 @@ trusted folders, seven workspace tools kept inside the folder of the chat, the A
 cards with the diff of an edit and the exact command, a Changes pane with revert, a Terminal pane with Stop, the
 "needs your input" badge and notification, and scheduled tasks.
 
-Step 13 (desktop shell) is built, tested and committed on branch `step-13-electron`: an Electron app with the server in
+Step 13 (desktop shell) is built, tested and merged (PR #14): an Electron app with the server in
 the process, a locked-down window, one instance, Quick Entry, a dictation toggle, tray, native notifications, open-with,
 `lumen://` links and launch at login. The packaging config is there but untested.
 
-**Next: steps 14 and 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 14 (providers, cloud labelling, secrets) is built, tested and committed on branch `step-14-providers`: consent per
+destination outside this computer (enforced by the server), Local only projects, a default model, OpenAI-compatible
+providers translated to Ollama's stream format, and a secret store (Keychain / Secret Service / encrypted file).
+
+**Next: step 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -566,6 +570,29 @@ Handoff notes:
   Move the Brave key, provider keys and MCP env values flagged secret into it. The API never returns secrets.
 - Tests: fake OpenAI-compatible streaming server (content, reasoning, tool-call deltas) end to end including the tool loop; secrets absent from `settings.json`; consent dialog; local-only project
   blocks cloud models; Keychain tests use a throwaway service name and clean up.
+
+**Done** on branch `step-14-providers` (tests: `tests/step14-providers.js` — 71 assertions, with `tests/fake-openai.js`; `tests/run.sh 14`).
+Handoff notes:
+- **New files:** `providers.js` (presets, ids `pv-<slug>`, the request translation `toOpenAI`, `streamChat` → NDJSON, `chatOnce`,
+  `fetchModels`), `secrets.js` (the three stores, `sanitize`/`resolve` of the settings), `public/features/providers.js` (the consent
+  dialog through the new `hooks.beforeGenerate`, Local only in the model list, the default model, the providers dialog),
+  `tests/fake-openai.js`.
+- **How the secrets work:** the settings in memory keep the real values (every reader — `mcp.connect`, the masks, the redaction — is
+  unchanged); `saveSettings()` writes a copy made by `secrets.sanitize()` at write time: each secret goes into the store (only when its
+  hash changed) and is replaced by `{"$secret": "<name>"}`; names that are gone are deleted from the store; `secretRefs` lists the names.
+  On start `secrets.resolve()` puts the values back. The slots: `web/brave`, `provider/<id>/key`, `mcp/<id>/env/<KEY>` (every env value —
+  the existing contract already treats them all as secret), `mcp/<id>/config/<key>` (extension settings marked `sensitive`). If the store
+  fails at save time, settings.json is not written at all (never with plain secrets). The test server uses `LUMEN_SECRETS=file`, so the
+  suite never touches the real Keychain; the Keychain is tested with a throwaway service name and cleaned up.
+- **The user's own server** (port 3100) moves its plain secrets (the Brave key, MCP env values) into the Keychain under the service
+  "Lumen" the first time it starts with this code.
+- **Gate:** `gate(model, {project, chat})` in `server.js` runs before `/api/chat`, `/api/title` and scheduled tasks: a cloud destination
+  needs `settings.consent[dest]` (`ollama-cloud` or a provider id), and a project with `localOnly` refuses it. The page sends `chat` and
+  `project` with every chat request (generate, title, compare).
+- **Translation details:** Ollama's tool results only carry the tool name, so `toOpenAI` gives every call of an assistant message an id
+  (`call_<msg>_<n>`) and matches the results that follow by name, in order. The image type is sniffed from the base64. `num_predict` →
+  `max_tokens`; `num_ctx` and `think` are not sent to providers. A stream request answered with one JSON body is handled too.
+- Not covered by the tests: the real MiniMax / OpenRouter / LM Studio APIs (only the fake server), the Linux Secret Service (no Linux here).
 
 ### Step 15: research and artifacts
 - **Research mode** (composer toggle, needs web tools): the model plans, then loops `web_search` / `fetch_page` within a budget (default 8 searches, 15 page fetches, 6 minutes) after **one up-front consent**

@@ -187,6 +187,7 @@
     <label>Instructions <span class="sub">Applied to every chat in this project</span>
       <textarea id="pInstr" rows="5" placeholder="e.g. You are a senior reviewer for our Go services. Answer tersely and cite file names."></textarea>
     </label>
+    <label class="check"><input type="checkbox" id="pLocal"> Local only <span class="sub">— chats of this project never use a model that runs outside this computer (Ollama cloud models, remote providers)</span></label>
     <div class="files-head"><strong>Knowledge</strong><span id="pTokens" class="sub"></span><button type="button" id="pAddFile" class="ghost">Add files</button></div>
     <input id="pFileInput" type="file" multiple hidden accept=".pdf,.txt,.md,.csv,.json,.js,.ts,.py,.html,.css,.yaml,.yml,.xml,.log,.sh,.sql,.go,.rs,.java,.c,.cpp,.h,.rb,.php,.swift,.kt,text/*">
     <div id="pFiles"></div>
@@ -214,7 +215,7 @@
       <textarea id="stPrompt" rows="3" maxlength="2000" placeholder="How should replies sound? e.g. Talk like a pirate and keep it short."></textarea>
       <div class="addrow"><span class="spacer"></span><button type="button" id="stCancel" class="ghost" hidden>Cancel edit</button><button type="button" id="stSave" class="ghost">Add style</button></div>
     </div>
-    <div class="dlg-actions"><button type="button" id="troubleBtn" class="ghost">Troubleshooting…</button><span class="spacer"></span><button type="button" id="setClose" class="primary">Done</button></div>
+    <div class="dlg-actions"><button type="button" id="provBtn" class="ghost">Models &amp; providers…</button><button type="button" id="troubleBtn" class="ghost">Troubleshooting…</button><span class="spacer"></span><button type="button" id="setClose" class="primary">Done</button></div>
   </div>
 </dialog>
 <dialog id="toolsDlg">
@@ -251,6 +252,41 @@
     <div id="allowList"></div>
     <div class="dlg-actions"><span class="spacer"></span><button type="button" id="toolsClose" class="primary">Done</button></div>
   </div>
+</dialog>
+<dialog id="provDlg">
+  <div>
+    <h2>Models &amp; providers</h2>
+    <h3>Default model</h3>
+    <p class="sub">New chats start with this model (“Last used” keeps the model you picked last).</p>
+    <select id="defModel" aria-label="Default model"></select>
+    <h3>Where your prompts go</h3>
+    <p class="sub">Models marked ☁ run outside this computer: Ollama cloud models and providers on another host. Lumen asks once per destination before the first prompt goes there.</p>
+    <div id="consentList"></div>
+    <h3>OpenAI-compatible providers</h3>
+    <p class="sub">Any server with the <code>/chat/completions</code> API: MiniMax, OpenRouter, LM Studio, a llama.cpp server… The key goes into the secret store and is never shown again.</p>
+    <div id="provList"></div>
+    <div class="stform" id="provForm">
+      <div class="addrow"><select id="pvPreset" aria-label="Preset"><option value="">Preset…</option></select><span id="pvNote" class="sub"></span></div>
+      <input id="pvName" maxlength="40" placeholder="Name, e.g. OpenRouter">
+      <input id="pvUrl" placeholder="Base URL, e.g. https://openrouter.ai/api/v1">
+      <input id="pvKey" type="password" autocomplete="off" placeholder="API key (leave empty to keep the stored one)">
+      <textarea id="pvModels" rows="2" placeholder="Models, one per line (or Fetch models)"></textarea>
+      <div class="addrow" id="pvCaps"></div>
+      <div class="addrow"><span id="pvMsg" class="sub"></span><span class="spacer"></span><button type="button" id="pvFetch" class="ghost" hidden>Fetch models</button><button type="button" id="pvCancel" class="ghost" hidden>Cancel</button><button type="button" id="pvSave" class="ghost">Add provider</button></div>
+    </div>
+    <h3>Secret store</h3>
+    <p class="sub" id="secretStore"></p>
+    <div id="secretWarn" class="warn" hidden></div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="provClose" class="primary">Done</button></div>
+  </div>
+</dialog>
+<dialog id="consentDlg">
+  <form method="dialog">
+    <h2>☁ This model runs outside your computer</h2>
+    <p id="consentText"></p>
+    <p class="sub">Your messages, the chat so far, attachments, project knowledge and memories in the prompt are sent there. You can revoke this in Settings › Models &amp; providers.</p>
+    <div class="dlg-actions"><span class="spacer"></span><button value="no" class="ghost" id="consentNo">Cancel</button><button value="yes" class="primary" id="consentYes">Allow and send</button></div>
+  </form>
 </dialog>
 <dialog id="wsDlg">
   <div>
@@ -469,5 +505,6 @@
 <script src="/features/splitview.js"></script>
 <script src="/features/workspace.js"></script>
 <script src="/features/desktop.js"></script>
+<script src="/features/providers.js"></script>
 </body>
 </html>

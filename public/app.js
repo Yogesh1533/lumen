@@ -52,6 +52,7 @@ const hooks = {
   onAwait: null,       // (call, chat, waiting) a tool call starts or stops waiting for approval
   onCancelTools: null, // () the user stopped the tool calls
   onToolResult: null,  // (call, chat) after a tool call has run
+  beforeGenerate: null,// async (model, chat) => false to not send (e.g. no consent for a cloud model)
 };
 
 // ---- utilities -----------------------------------------------------------
@@ -270,7 +271,7 @@ $('#moveForm').onsubmit = async () => {
 let editing = null; // project being edited in the dialog (full data)
 async function openProjectDialog(id) {
   editing = await api('/projects/' + id);
-  $('#pName').value = editing.name; $('#pInstr').value = editing.instructions;
+  $('#pName').value = editing.name; $('#pInstr').value = editing.instructions; $('#pLocal').checked = !!editing.localOnly;
   renderProjectFiles(); $('#projDlg').showModal();
 }
 function renderProjectFiles() {
@@ -306,7 +307,7 @@ $('#pFileInput').onchange = async (e) => {
 };
 $('#pCancel').onclick = () => $('#projDlg').close();
 $('#projForm').onsubmit = async () => {
-  await api('/projects/' + editing.id, { method: 'PUT', body: { name: $('#pName').value, instructions: $('#pInstr').value } });
+  await api('/projects/' + editing.id, { method: 'PUT', body: { name: $('#pName').value, instructions: $('#pInstr').value, localOnly: $('#pLocal').checked } });
   await loadProjects();
   if (state.project === editing.id) await setProject(editing.id);
   toast('Project saved');
@@ -888,7 +889,7 @@ async function autoTitle(c, reply) {
   c.titled = true;
   try {
     const first = c.messages.find((m) => m.role === 'user');
-    const { title } = await api('/title', { method: 'POST', body: { model: c.model, user: first ? first.content || (first.attachments && first.attachments[0].name) : '', assistant: reply.content } });
+    const { title } = await api('/title', { method: 'POST', body: { model: c.model, chat: c.id, project: c.project || null, user: first ? first.content || (first.attachments && first.attachments[0].name) : '', assistant: reply.content } });
     if (!title) return;
     c.title = title;
     await api('/chats/' + c.id, { method: 'PUT', body: { title, titled: true } });
@@ -999,6 +1000,7 @@ async function generate(fork, model) {
   // follows a tool call continues the same branch.
   const ownsFork = !!(fork && !fork.finished);
   if (!useModel) { if (ownsFork) { undoFork(fork); renderAll(); } return toast('No model selected — is Ollama running?'); }
+  if (hooks.beforeGenerate && (await hooks.beforeGenerate(useModel, c)) === false) { if (ownsFork) { undoFork(fork); renderAll(); } return; }
   const reply = { role: 'assistant', content: '', model: useModel, t: Date.now() };
   c.messages.push(reply);
   if (ownsFork) { finishFork(fork, reply); fork.finished = true; }
@@ -1017,7 +1019,7 @@ async function generate(fork, model) {
   try {
     const r = await fetch('/api/chat', {
       method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: useModel, system, ...(canThink ? { think: $('#thinkToggle').checked } : {}), ...(useTools ? { tools: useTools.defs } : {}), options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
+      body: JSON.stringify({ model: useModel, chat: c.id, project: c.project || null, system, ...(canThink ? { think: $('#thinkToggle').checked } : {}), ...(useTools ? { tools: useTools.defs } : {}), options: settings(system.length + wire.reduce((n, m) => n + m.content.length, 0)),
         messages: wire }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
@@ -1185,7 +1187,7 @@ state.ready = (async function init() {
   try {
     const { models } = await api('/models');
     state.models = models;
-    sel.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}${m.cloud ? ' ☁' : ''}</option>`).join('');
+    sel.innerHTML = models.map((m) => `<option value="${esc(m.id)}"${m.cloud ? ' data-cloud="1"' : ''}>${esc(m.label || m.id)}${m.cloud ? ' ☁' : ''}</option>`).join('');
     const saved = pref('model'); if (saved && models.some((m) => m.id === saved)) sel.value = saved;
     updateThinkUI();
     if (!models.length) $('#status').textContent = 'No models found. Run: ollama pull <model>';
