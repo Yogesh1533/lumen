@@ -22,7 +22,7 @@ a skill is a folder with a `SKILL.md`; a Skills dialog (list, switch on and off,
 upload a zip or loose files, delete), two starter skills, the skills tools `use_skill` and
 `read_skill_file`, and the enabled skills in the system prompt.
 
-Step 11 (side chat and split view) is built, tested and committed on branch `step-11-side-split` (not merged yet):
+Step 11 (side chat and split view) is built, tested and merged (PR #12):
 a side chat in a panel of its own (its own chat record, seeded with a bounded snapshot of the main
 conversation, "Insert into chat" puts the answer into the main chat), a split view whose second pane
 is Lumen itself in an embed mode, and a cross-pane refresh over a BroadcastChannel.
@@ -31,7 +31,12 @@ The server stamps the chats with a monotonic clock (`stamp.js`): the stamps are 
 so two chats made in the same millisecond never tie and "continue last chat" always opens the chat
 that was updated last (it used to open the older one of the two).
 
-**Next: steps 12 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
+Step 12 (workspace agent) is built, tested and committed on branch `step-12-workspace`:
+trusted folders, seven workspace tools kept inside the folder of the chat, the Ask and Auto-edit modes, approval
+cards with the diff of an edit and the exact command, a Changes pane with revert, a Terminal pane with Stop, the
+"needs your input" badge and notification, and scheduled tasks.
+
+**Next: steps 13 to 15 below.** The user asked for all of them to be run autonomously (build, test, merge, repeat).
 
 ## 2. Orientation
 
@@ -486,6 +491,36 @@ Highest risk step. There is **no VM sandbox**, so keep it conservative.
 - **Scheduled tasks (minimal):** daily/interval prompt that runs headless while the server is up; may only use tools already set to Always allow; result lands in a chat; notification.
 - Tests (use a temp folder): containment (`../`, symlink escape, absolute outside) all blocked; edit approval shows a diff; revert restores bytes; shell approval; env scrub;
   output truncation; timeout kill; protected folder rejected; real-model task (create a file, read it back); schedule fires.
+
+**Done** on branch `step-12-workspace` (tests: `tests/step12-workspace.js` — 143 assertions, one skipped when `~/.ssh` does not exist; `tests/run.sh 12`).
+Handoff notes:
+- **New files:** `workspace.js` (the server side: folder validation, containment, the tools, the snapshots, the shell runner, the approval
+  tokens) and `public/features/workspace.js` (the bar, the dialog, the Changes and Terminal pane, the badge, the task notices).
+  `server.js` grew `/api/workspace/*`, the `workspace` built-in server and the scheduler; `package.json` grew `diff`.
+- **`app.js` grew five additive hooks:** `toolServer(srv)` (false keeps a server's tools from the model — the workspace tools only go out
+  when the chat has a folder), `toolPolicy(call, chat)` (returns `{auto}`, `{ask, noAlways, preview, previewKind, body}` or `{error}`;
+  `body` is merged into the `/api/mcp/call` request), `onAwait(call, chat, waiting)`, `onCancelTools()` and `onToolResult(call, chat)`.
+  The approval card shows `call.preview` and hides "Always allow" when `call.noAlways`.
+- **Where the workspace of a chat lives:** `settings.workspace.chats[chatId] = {folder, mode}`; a temporary chat (and a chat that is not
+  saved yet) uses a page-made id (`tmp-…`) kept only in the server's memory. A new chat is saved before its first workspace call, so its
+  changes are filed under its own id. A chat without a folder of its own gets the folder of its project (`settings.workspace.projects`)
+  in the Ask mode. A folder that is no longer trusted gives no access, whatever a chat says.
+- **The approval token** (`POST /api/workspace/preview`) is the server-side half of the approval: an edit in the Ask mode and every
+  command only run with a token bound to the session, the tool, the exact arguments (a hash) and, for an edit, the file's hash at
+  preview time; it is good once, for ten minutes. In Auto-edit the page still passes the token of the preview, so the file-hash check
+  holds there too. This guards against page bugs and replays — not against a script in Lumen's own page (same rights as the user).
+- **"Always allow" lives in the browser** (`localStorage`), so the server cannot see it. A scheduled task therefore carries its own
+  `allowTools` list (picked in the dialog from the browser's always-allow set). The server drops `workspace/fs_write`, `fs_edit` and
+  `shell` from it, and the headless call path refuses them again.
+- **Shell:** `/bin/sh -c` with `detached: true` (its own process group; Stop and the timeout kill `-pid`, SIGTERM then SIGKILL after 2 s);
+  environment = the server's minus a deny-list (names with KEY/TOKEN/SECRET/PASSWORD/AUTH/SESSION/…, prefixes ANTHROPIC_/OPENAI_/AWS_/GH_/
+  GITHUB_/SSH_/GPG_/LUMEN_/OLLAMA_ …); output kept to 100 KB (the command keeps running; the rest is dropped); the model may lower the
+  timeout (`timeout_seconds`, 1–120). The Terminal pane polls `GET /api/workspace/runs/:chat` every 500 ms while a command runs.
+- **Scheduler:** a 5 s tick in the server; an interval task first runs one interval after it is made. It calls Ollama without streaming,
+  with up to 8 tool rounds, and stores the answer as a new chat `Scheduled: <name>`. The page polls `GET /api/workspace` every 15 s and
+  shows a toast (and a notification when hidden) for a new run.
+- Not covered by the tests: a real network mount (the check is tested with a fake mount list), a real browser notification (the test fakes
+  `Notification` and `document.hidden`), the daily schedule firing at its time (only the interval one is waited for).
 
 ### Step 13: native shell (Electron)
 - `desktop/main.js`: start the server in-process, `BrowserWindow` on `http://127.0.0.1:PORT` with `contextIsolation`, `sandbox`, no node integration, minimal preload,

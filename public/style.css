@@ -364,8 +364,8 @@ mark.find-hit.cur { background: #ff9d2e; }
 .envrow input { flex: 1; }
 
 /* step 11: the side chat and the split view (the second pane of Lumen) */
-#sidePane, #splitPane { width: 38%; min-width: 340px; flex: none; padding: 0; gap: 0; border-right: 0; border-left: 1px solid var(--border); background: var(--bg); }
-#sidePane[hidden], #splitPane[hidden] { display: none; }
+#sidePane, #splitPane, #wsPane { width: 38%; min-width: 340px; flex: none; padding: 0; gap: 0; border-right: 0; border-left: 1px solid var(--border); background: var(--bg); }
+#sidePane[hidden], #splitPane[hidden], #wsPane[hidden] { display: none; }
 .pane-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
 .pane-head strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 #sideFrame, #splitFrame { flex: 1; width: 100%; border: 0; background: var(--bg); }
@@ -379,7 +379,7 @@ body.embed header.compact select, body.embed header.compact button { font-size: 
 
 /* print: the conversation only — the browser can save it as a PDF */
 @media print {
-  #sidebar, #controls, #artifact, #sidePane, #splitPane, header, .findbar, #composer, #welcome, #toast, dialog, .msg .tools, .msg .vers { display: none !important; }
+  #sidebar, #controls, #artifact, #sidePane, #splitPane, #wsPane, .wsbar, header, .findbar, #composer, #welcome, #toast, dialog, .msg .tools, .msg .vers { display: none !important; }
   html, body, #app, main { height: auto; overflow: visible; background: #fff; color: #000; }
   #messages { overflow: visible; padding: 0; }
   .msg { max-width: none; break-inside: avoid; }
@@ -387,3 +387,21 @@ body.embed header.compact select, body.embed header.compact button { font-size: 
   .msg.user .content { background: #f2f2f2; }
   a { color: #000; }
 }
+
+/* ---- step 12: the workspace ---- */
+.wsbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; max-width: 820px; width: calc(100% - 32px); margin: 0 auto 6px; font-size: 13px; }
+.wsbar[hidden] { display: none; }
+.wsbar select { max-width: 260px; }
+.wsbar .wswarn { color: var(--warn, #b45309); }
+#wsPane { display: flex; flex-direction: column; }
+.wsbody { overflow: auto; padding: 10px 12px; flex: 1; }
+.wsbody[hidden] { display: none; }
+.wsfile, .wsrun { border: 1px solid var(--border); border-radius: 8px; margin: 8px 0; padding: 8px; }
+.wsfile .wh, .wsrun .wh { display: flex; gap: 8px; align-items: center; }
+.wsfile .wh b, .wsrun .wh code { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+pre.diff, pre.preview.diff, .wsrun pre { max-height: 360px; overflow: auto; font-size: 12px; white-space: pre; }
+pre.preview { margin: 6px 0; padding: 8px; border-radius: 6px; background: var(--code-bg, rgba(127,127,127,.1)); }
+.dl-add { color: #15803d; } .dl-del { color: #b91c1c; } .dl-hunk { color: #6b7280; }
+.chat .wait { margin-left: 4px; font-size: 11px; padding: 0 6px; border-radius: 9px; background: #f59e0b; color: #111; }
+.seg button.on { font-weight: 600; text-decoration: underline; }
+@media (max-width: 900px) { #wsPane { position: fixed; z-index: 6; inset: 0 0 0 auto; width: 100%; min-width: 0; } }

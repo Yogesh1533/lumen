@@ -41,6 +41,7 @@
       <label class="toggle" title="Temporary chats are not saved"><input type="checkbox" id="tempToggle"> Temporary</label>
       <button id="skillsBtn" class="ghost" title="Skills">🧩 Skills</button>
       <button id="toolsBtn" class="ghost" title="Tools &amp; MCP servers">🔧 Tools</button>
+      <button id="wsBtn" class="ghost embed-hide" title="Workspace: trusted folders and scheduled tasks">📂 Workspace</button>
       <button id="usageBtn" class="ghost" title="Token usage">📊 Usage</button>
       <button id="findBtn" class="ghost" title="Find in conversation">🔍</button>
       <button id="exportChatBtn" class="ghost" title="Export this chat">⤓</button>
@@ -70,6 +71,18 @@
       <div class="hero"><span class="logo big"></span><h1>How can I help you today?</h1></div>
       <div id="suggestions"></div>
     </section>
+
+    <div id="wsBar" class="wsbar" hidden>
+      <span class="wslabel">📂</span>
+      <select id="wsFolder" aria-label="Workspace folder of this chat" title="The folder the model may work in"></select>
+      <select id="wsMode" aria-label="Permission mode" title="Ask: reads run, every edit and command asks. Auto-edit: edits run, commands still ask.">
+        <option value="ask">Ask before edits</option>
+        <option value="auto-edit">Auto-edit (commands still ask)</option>
+      </select>
+      <button type="button" id="wsChangesBtn" class="ghost" title="The files changed in this chat">Changes <span id="wsChangesN">0</span></button>
+      <button type="button" id="wsTermBtn" class="ghost" title="The commands run in this chat">Terminal</button>
+      <span class="sub wswarn" title="An approved command runs with your own permissions">Not a sandbox</span>
+    </div>
 
     <form id="composer">
       <div class="box" id="dropzone">
@@ -138,6 +151,25 @@
       <button id="sideClose" class="icon" title="Close the side chat">✕</button>
     </div>
     <iframe id="sideFrame" title="Side chat"></iframe>
+  </aside>
+
+  <aside id="wsPane" hidden>
+    <div class="pane-head">
+      <div class="seg" role="tablist">
+        <button type="button" id="wsTabChanges" class="ghost on" role="tab">Changes</button>
+        <button type="button" id="wsTabTerm" class="ghost" role="tab">Terminal</button>
+      </div>
+      <span class="spacer"></span>
+      <button id="wsPaneClose" class="icon" title="Close">✕</button>
+    </div>
+    <div id="wsChanges" class="wsbody">
+      <div class="addrow"><span id="wsChangesMsg" class="sub"></span><span class="spacer"></span><button type="button" id="wsRevertAll" class="ghost">Revert all</button></div>
+      <div id="wsChangeList"></div>
+    </div>
+    <div id="wsTerm" class="wsbody" hidden>
+      <div class="warn">Commands run on this computer with your permissions — this is not a sandbox. Each one needs your approval, stops after its timeout (at most 120 s) and keeps at most 100 KB of output.</div>
+      <div id="wsRunList"></div>
+    </div>
   </aside>
 
   <aside id="splitPane" hidden>
@@ -218,6 +250,42 @@
     <h3>Auto-approved tools</h3>
     <div id="allowList"></div>
     <div class="dlg-actions"><span class="spacer"></span><button type="button" id="toolsClose" class="primary">Done</button></div>
+  </div>
+</dialog>
+<dialog id="wsDlg">
+  <div>
+    <h2>Workspace</h2>
+    <div class="warn"><b>This is not a sandbox.</b> The model can read the files of a trusted folder. Every edit (unless a chat is in auto-edit mode) and every command needs your approval, and an approved command runs with your own permissions.</div>
+    <h3>Trusted folders</h3>
+    <p class="sub">Type an absolute path (browsers cannot pick folders). Your home folder itself, system folders, <code>~/Library</code>, <code>~/.ssh</code>, <code>~/.config</code>, other users' folders and network folders are refused.</p>
+    <div id="wsFolders"></div>
+    <div class="addrow"><input id="wsPath" placeholder="/Users/you/projects/site" autocomplete="off"><button type="button" id="wsAddFolder" class="ghost">Trust folder</button></div>
+    <div id="wsFolderMsg" class="sub"></div>
+    <div id="wsProjRow" hidden>
+      <h3>Folder of this project</h3>
+      <p class="sub">New chats of the project start in this folder (in the “ask” mode).</p>
+      <select id="wsProjFolder"></select>
+    </div>
+    <h3>Notifications</h3>
+    <p class="sub">When a tool call waits for your approval and this tab is in the background, Lumen can show a notification.</p>
+    <div class="addrow"><button type="button" id="wsNotify" class="ghost">Allow notifications</button><span id="wsNotifyState" class="sub"></span></div>
+    <h3>Scheduled tasks</h3>
+    <p class="sub">A prompt that runs while Lumen is running; the answer lands in a new chat. A task can only use the tools you set to “Always allow” and pick here — never a tool that changes files or runs a command.</p>
+    <div id="wsTasks"></div>
+    <div class="stform">
+      <input id="tkName" maxlength="60" placeholder="Name, e.g. Morning summary">
+      <textarea id="tkPrompt" rows="2" placeholder="Prompt"></textarea>
+      <div class="addrow">
+        <select id="tkModel" aria-label="Model of the task"></select>
+        <select id="tkKind" aria-label="When"><option value="interval">Every … minutes</option><option value="daily">Every day at …</option></select>
+        <input id="tkEvery" type="number" min="1" value="60" style="width:6em" aria-label="Minutes">
+        <input id="tkAt" type="time" value="09:00" hidden aria-label="Time">
+        <select id="tkFolder" aria-label="Folder of the task"></select>
+      </div>
+      <div id="tkTools" class="sub"></div>
+      <div class="addrow"><span id="tkMsg" class="sub"></span><span class="spacer"></span><button type="button" id="tkAdd" class="ghost">Add task</button></div>
+    </div>
+    <div class="dlg-actions"><span class="spacer"></span><button type="button" id="wsClose" class="primary">Done</button></div>
   </div>
 </dialog>
 <dialog id="claudeDlg">
@@ -399,5 +467,6 @@
 <script src="/features/claudeimport.js"></script>
 <script src="/features/skills.js"></script>
 <script src="/features/splitview.js"></script>
+<script src="/features/workspace.js"></script>
 </body>
 </html>
